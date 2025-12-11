@@ -221,8 +221,35 @@ def draw_input_param(context: bpy.types.Context, layout: bpy.types.UILayout, ite
             elif ptype == "mesh":
                 box.prop_search(item, "mesh_name", context.scene, "objects", text="")
         elif item.source_type == 'FILE':
+            # 1. Draw standard Blender file picker
             box.prop(item, "file_path", text="")
+
+            # 2. POST-SELECTION VALIDATION (The "Filter")
+            # If the user picks a file, we check the extension immediately.
+            path = item.file_path.lower()
+            if path:
+                import os
+                valid = True
+                ext = os.path.splitext(path)[1]
+
+                # Check Image
+                if ptype == "image" and ext not in ['.png', '.jpg', '.jpeg', '.webp']:
+                    valid = False
+                    msg = "Selected file is not an image!"
+
+                # Check Mesh
+                elif ptype == "mesh" and ext not in ['.glb', '.gltf']:
+                    valid = False
+                    msg = "Selected file is not a GLB/GLTF mesh!"
+
+                # Draw Warning if invalid
+                if not valid:
+                    row = box.row()
+                    row.alert = True  # Makes the text red
+                    row.label(text=msg, icon='ERROR')
+
         return
+
 
     # For simple types
     row = layout.row(align=True)
