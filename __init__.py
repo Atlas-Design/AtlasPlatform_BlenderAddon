@@ -1,0 +1,72 @@
+# In __init__.py
+"""
+The main entry point for the MLXAR Workflow Integration addon.
+
+This file defines the addon's metadata (bl_info) and contains the top-level
+register() and unregister() functions that Blender calls when the addon is
+enabled or disabled.
+
+It follows a modular structure by importing and calling the registration
+functions from its submodules, rather than handling all class registrations
+directly. This makes the addon easier to maintain and extend.
+"""
+
+bl_info = {
+    "name": "MLXAR Workflow Integration",
+    "author": "MLXAR",
+    "version": (0, 1, 0),
+    "blender": (4, 0, 0),
+    "location": "3D View > Sidebar (N-Panel) > MLXAR",
+    "category": "3D View",
+    "description": "Integrates the MLXAR platform's generative workflows directly into Blender's UI.",
+    "doc_url": "",  # Optional: Add a link to your documentation
+}
+
+# --- Submodule Imports ---
+# Instead of importing every class, we import the registration functions
+# from each module. This keeps the __init__.py file clean.
+
+from . import atlas_workflow_state
+from . import custom_icons
+from . import operators
+from . import ui_panel
+
+import logging
+log = logging.getLogger("atlas_workflow")
+
+
+def register():
+    """
+    Registers all parts of the addon with Blender.
+
+    This function is called when the addon is enabled. It calls the register()
+    function from each of the addon's modules in the correct order.
+
+    The registration order is important:
+    1. State (Property Groups)
+    2. Operators (Actions that may depend on the state)
+    3. UI (Panels that display the state and use the operators)
+    """
+    atlas_workflow_state.register()
+    custom_icons.register()
+    operators.register()
+    ui_panel.register()
+
+
+def unregister():
+    """
+    Unregisters all parts of the addon from Blender.
+
+    This function is called when the addon is disabled. It unregisters all
+    modules in the reverse order of registration to ensure a clean shutdown.
+    """
+    ui_panel.unregister()
+    operators.unregister()
+    custom_icons.unregister()
+    atlas_workflow_state.unregister()
+
+
+# This allows the script to be run directly from Blender's text editor
+# to test the registration process.
+if __name__ == "__main__":
+    register()
