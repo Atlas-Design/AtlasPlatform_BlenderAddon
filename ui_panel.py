@@ -171,9 +171,11 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
                 button_row.operator("atlas.rename_workflow", text="Rename")
                 button_row.operator("atlas.delete_workflow", text="Delete")
 
-        # --- Final Global Action ---
+        # --- Final Global Actions ---
+        row = layout.row(align=True)
         if state.active_api_id:
-            layout.operator("atlas.clear_cache", text="Clear Cache", icon='TRASH')
+            row.operator("atlas.clear_cache", text="Clear Cache", icon='TRASH')
+        row.operator("atlas.open_preferences", text="", icon='PREFERENCES')
 
 
 class ATLAS_PT_InputsPanel(ATLAS_PT_BasePanel):

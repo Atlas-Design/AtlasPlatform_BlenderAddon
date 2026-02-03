@@ -36,6 +36,7 @@ from .api_client import AtlasAPIClient, ExecutionStatus
 from . import job_manager
 from .job_manager import JobRecord, JobStatus, ParamSnapshot
 from .job_manager import ExecutionStatus as JobExecutionStatus
+from . import preferences
 
 
 # -------------------------------------------------------------------
@@ -369,6 +370,27 @@ class ATLAS_OT_ImportJobOutputMesh(Operator):
         return {'FINISHED'}
 
 
+class ATLAS_OT_OpenPreferences(Operator):
+    """Open Atlas addon preferences"""
+    bl_idname = "atlas.open_preferences"
+    bl_label = "Atlas Settings"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        # Open the preferences window and navigate to add-ons
+        bpy.ops.screen.userpref_show()
+        
+        # Try to navigate to our addon
+        try:
+            # Set the preferences section to Add-ons
+            context.preferences.active_section = 'ADDONS'
+        except:
+            pass
+        
+        self.report({'INFO'}, "Opened preferences. Navigate to Add-ons > Atlas Workflow Integration")
+        return {'FINISHED'}
+
+
 class ATLAS_OT_PickInputFile(Operator, ImportHelper):
     """Select a file with specific format filtering"""
     bl_idname = "mlxar.pick_input_file"  # Using the new branding
@@ -589,9 +611,6 @@ class ATLAS_OT_ImportOutputMesh(Operator):
 # --- Main Workflow Execution Operator (Modal) ---
 # -------------------------------------------------------------------
 
-# Default polling interval in seconds
-POLL_INTERVAL = 2.0
-
 
 class ATLAS_OT_RunWorkflow(Operator):
     """
@@ -639,6 +658,9 @@ class ATLAS_OT_RunWorkflow(Operator):
     # --- Running Job UI Tracking ---
     _running_job_id: str = ""  # ID to find this job in running_jobs collection
     _workflow_name: str = ""  # Store workflow name for UI
+    
+    # --- Settings (from preferences) ---
+    _poll_interval: float = 2.0  # Polling interval in seconds
 
     # --- Orchestrator (runs in background thread) ---
 
@@ -671,7 +693,7 @@ class ATLAS_OT_RunWorkflow(Operator):
             # STAGE 3: POLL FOR COMPLETION
             self._status_message = "Waiting for execution..."
             while True:
-                time.sleep(POLL_INTERVAL)
+                time.sleep(self._poll_interval)
                 
                 result = client.poll_status(execution_id)
                 self._current_status = result.status.value
@@ -780,18 +802,27 @@ class ATLAS_OT_RunWorkflow(Operator):
             shutil.rmtree(self._temp_dir)
             return {'CANCELLED'}
 
-        # --- 3. Create API client ---
+        # --- 3. Create API client with preferences ---
         base_url = state.base_url.strip()
+        timeout = preferences.get_effective_timeout(context)
+        self._poll_interval = preferences.get_poll_interval(context)
+        
         try:
             client = AtlasAPIClient(
                 base_url=base_url,
                 version=state.version,
-                timeout=300  # TODO: Make configurable in preferences
+                timeout=timeout if timeout else 0  # 0 means no timeout in requests
             )
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
             shutil.rmtree(self._temp_dir)
             return {'CANCELLED'}
+        
+        # Check storage limit warning
+        if preferences.check_storage_limit(context):
+            prefs = preferences.get_preferences(context)
+            if prefs and prefs.warn_on_storage_limit:
+                self.report({'WARNING'}, "Job storage limit exceeded. Consider cleaning up old jobs.")
 
         # --- 4. Create job record for persistence ---
         inputs_snapshot = self._create_inputs_snapshot(state)
@@ -901,7 +932,7 @@ class ATLAS_OT_RunWorkflow(Operator):
 
             # --- SUCCESS: Update state and import results ---
             self._update_primitive_outputs(state)
-            self._process_import_plan(state)
+            self._process_import_plan(state, context)
             
             # Complete the job record with outputs
             if self._job:
@@ -1027,8 +1058,11 @@ class ATLAS_OT_RunWorkflow(Operator):
                 except (ValueError, TypeError) as e:
                     log.warning(f"[Atlas] Could not set output '{out_param.param_id}': {e}")
 
-    def _process_import_plan(self, state):
+    def _process_import_plan(self, state, context):
         """Processes the downloaded files, importing them into Blender."""
+        auto_import_meshes = preferences.should_auto_import_meshes(context)
+        auto_apply_images = preferences.should_auto_apply_images(context)
+        
         for item in self._import_plan:
             out_param = next((p for p in state.outputs if p.param_id == item['param_id']), None)
             if not out_param:
@@ -1040,13 +1074,29 @@ class ATLAS_OT_RunWorkflow(Operator):
                     img.pack()  # Pack into the .blend file
                     out_param.image_name = img.name
                     out_param.temp_file_path = item['path']  # Store for job persistence
+                    
+                    # Auto-apply image to active object if enabled
+                    if auto_apply_images and context.active_object:
+                        try:
+                            bpy.ops.atlas.apply_output_image(image_name=img.name)
+                            log.info(f"[Atlas] Auto-applied image to active object")
+                        except Exception as e:
+                            log.warning(f"[Atlas] Could not auto-apply image: {e}")
+                            
                 except Exception as e:
                     log.warning(f"[Atlas] Error importing image for {item['param_id']}: {e}")
 
             elif item['type'] == 'MESH':
-                # For meshes, just store the path. The user can import it via a button.
                 out_param.temp_file_path = item['path']
                 out_param.mesh_name = f"Result: {out_param.label}"
+                
+                # Auto-import mesh if enabled
+                if auto_import_meshes:
+                    try:
+                        bpy.ops.import_scene.gltf(filepath=item['path'])
+                        log.info(f"[Atlas] Auto-imported mesh: {item['param_id']}")
+                    except Exception as e:
+                        log.warning(f"[Atlas] Could not auto-import mesh: {e}")
 
     def _create_inputs_snapshot(self, state) -> list:
         """Create a snapshot of all input parameters for job persistence."""
@@ -1134,6 +1184,7 @@ classes = (
     ATLAS_OT_OpenJobFolder,
     ATLAS_OT_ViewJobOutputImage,
     ATLAS_OT_ImportJobOutputMesh,
+    ATLAS_OT_OpenPreferences,
 )
 
 

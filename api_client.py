@@ -110,14 +110,14 @@ class AtlasAPIClient:
             client.download_file(api_id, result.outputs["output_mesh"], "/path/to/output.glb")
     """
 
-    def __init__(self, base_url: str, version: str = "0.1", timeout: int = 300):
+    def __init__(self, base_url: str, version: str = "0.1", timeout: Optional[int] = 300):
         """
         Initialize the API client.
         
         Args:
             base_url: The API base URL (e.g., "https://api.prod.atlas.design")
             version: API version string (e.g., "0.1")
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds. Set to 0 or None for no timeout.
         """
         if requests is None:
             raise RuntimeError("The 'requests' library is not installed. Please install it to use the Atlas API.")
@@ -128,7 +128,8 @@ class AtlasAPIClient:
             self.base_url = f"https://{self.base_url}"
         
         self.version = version
-        self.timeout = timeout
+        # Handle timeout: 0 or None means no timeout
+        self.timeout = timeout if timeout and timeout > 0 else None
 
     def _build_url(self, *parts: str) -> str:
         """Build a full URL from path parts"""

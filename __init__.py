@@ -26,6 +26,7 @@ bl_info = {
 # Instead of importing every class, we import the registration functions
 # from each module. This keeps the __init__.py file clean.
 
+from . import preferences
 from . import atlas_workflow_state
 from . import custom_icons
 from . import operators
@@ -43,10 +44,12 @@ def register():
     function from each of the addon's modules in the correct order.
 
     The registration order is important:
-    1. State (Property Groups)
-    2. Operators (Actions that may depend on the state)
-    3. UI (Panels that display the state and use the operators)
+    1. Preferences (must be first for bl_idname to match package)
+    2. State (Property Groups)
+    3. Operators (Actions that may depend on the state)
+    4. UI (Panels that display the state and use the operators)
     """
+    preferences.register()
     atlas_workflow_state.register()
     custom_icons.register()
     operators.register()
@@ -64,6 +67,7 @@ def unregister():
     operators.unregister()
     custom_icons.unregister()
     atlas_workflow_state.unregister()
+    preferences.unregister()
 
 
 # This allows the script to be run directly from Blender's text editor
