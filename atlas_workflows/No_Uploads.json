@@ -1,0 +1,40 @@
+{
+    "version": "0.1",
+    "api_id": "f6166de3-9a32-4e34-bc58-47dd97dfb9f4",
+    "base_url": "https://api.prod.atlas.design",
+    "name": "No_Uploads",
+    "inputs": [
+        {
+            "id": "input_boolean",
+            "type": "boolean",
+            "label": "input_boolean",
+            "default_value": false
+        },
+        {
+            "id": "input_number",
+            "type": "number",
+            "label": "input_number",
+            "default_value": 0
+        },
+        {
+            "id": "input_text",
+            "type": "string",
+            "label": "input_text",
+            "default_value": ""
+        }
+    ],
+    "outputs": [
+        {
+            "id": "output_boolean",
+            "type": "boolean"
+        },
+        {
+            "id": "output_text",
+            "type": "string"
+        },
+        {
+            "id": "output_number",
+            "type": "number"
+        }
+    ]
+}

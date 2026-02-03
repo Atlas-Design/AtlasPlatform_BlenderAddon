@@ -1,0 +1,93 @@
+{
+  "JobId": "3e50b5cd-1296-4c6b-8115-ece55fc74ddb",
+  "WorkflowId": "f6166de3-9a32-4e34-bc58-47dd97dfb9f4",
+  "WorkflowName": "No_Uploads",
+  "WorkflowVersion": "0.1",
+  "CreatedAtUtc": "2026-02-03T15:00:32.424772+00:00",
+  "CompletedAtUtc": "2026-02-03T15:00:42.431290+00:00",
+  "Status": 2,
+  "ExecutionStatus": 3,
+  "ExecutionId": null,
+  "Progress01": 1.0,
+  "ErrorMessage": null,
+  "ErrorNodeName": null,
+  "ErrorNodeType": null,
+  "ErrorNodeId": null,
+  "InputsSnapshot": [
+    {
+      "ParamId": "input_boolean",
+      "Label": "input_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_number",
+      "Label": "input_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 45.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_text",
+      "Label": "input_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "start",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "OutputsSnapshot": [
+    {
+      "ParamId": "output_boolean",
+      "Label": "output_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_text",
+      "Label": "output_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "Great\u2014what subject should I make jokes about? Examples: coffee, cats, Mondays, tech support, gym life, cooking. Prefer puns, classic one-liners, or dad-jokes?",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_number",
+      "Label": "output_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 55.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "JobFolderPath": "C:\\Users\\matan\\AppData\\Roaming\\Blender Foundation\\Blender\\4.4\\scripts\\addons\\Platform_BlenderAddon\\atlas_jobs\\No_Uploads\\2026-02-03_15-00-32_3e50b5cd"
+}

@@ -1,0 +1,93 @@
+{
+  "JobId": "48938dc3-de07-401f-849c-235be9092215",
+  "WorkflowId": "f6166de3-9a32-4e34-bc58-47dd97dfb9f4",
+  "WorkflowName": "No_Uploads",
+  "WorkflowVersion": "0.1",
+  "CreatedAtUtc": "2026-02-03T14:51:18.164917+00:00",
+  "CompletedAtUtc": "2026-02-03T14:51:48.572907+00:00",
+  "Status": 2,
+  "ExecutionStatus": 3,
+  "ExecutionId": null,
+  "Progress01": 1.0,
+  "ErrorMessage": null,
+  "ErrorNodeName": null,
+  "ErrorNodeType": null,
+  "ErrorNodeId": null,
+  "InputsSnapshot": [
+    {
+      "ParamId": "input_boolean",
+      "Label": "input_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": true,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_number",
+      "Label": "input_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 85.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_text",
+      "Label": "input_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "tests",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "OutputsSnapshot": [
+    {
+      "ParamId": "output_boolean",
+      "Label": "output_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": true,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_text",
+      "Label": "output_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "- I study for tests the way I charge my phone: wait until 2% and then panic.\n- Multiple choice strategy: When in doubt, pick C. When not in doubt\u2026 still pick C.\n- My teacher said it\u2019s a no-calculator test. Great, so we\u2019re doing history, because we\u2019re going back in time.\n- Pop quiz: Did you read the chapter? A) Yes B) No C) I\u2019ll pick C\n- I love open-book tests. It\u2019s like the exam saying, \u201cI know you don\u2019t remember any of this.\u201d\n- Scantrons: the adult coloring book that judges you.\n- My code passes all unit tests\u2014unfortunately, the users weren\u2019t included in the test suite.\n- Integration tests: where your bugs meet my bugs and start a family.\n- End-to-end tests are just pressing a button and whispering, \u201cPlease work.\u201d\n- QA told me my feature was unstable. I said it\u2019s not a bug, it\u2019s a surprise mechanic. QA said the surprise is the crash.\n- Test anxiety is when your smartwatch thinks you\u2019re doing cardio while sitting.\n- Grading curve: because nothing says \u201cfair\u201d like everyone being wrong together.",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_number",
+      "Label": "output_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 95.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "JobFolderPath": "C:\\Users\\matan\\AppData\\Roaming\\Blender Foundation\\Blender\\4.4\\scripts\\addons\\Platform_BlenderAddon\\atlas_jobs\\No_Uploads\\2026-02-03_14-51-18_48938dc3"
+}

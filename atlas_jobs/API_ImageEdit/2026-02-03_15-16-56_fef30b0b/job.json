@@ -1,0 +1,69 @@
+{
+  "JobId": "fef30b0b-bd06-4200-a83c-d803debb4789",
+  "WorkflowId": "146da094-d576-4d6f-8b1f-8068b7d4b5d2",
+  "WorkflowName": "API_ImageEdit",
+  "WorkflowVersion": "0.1",
+  "CreatedAtUtc": "2026-02-03T15:16:56.752541+00:00",
+  "CompletedAtUtc": "2026-02-03T15:17:16.071989+00:00",
+  "Status": 2,
+  "ExecutionStatus": 3,
+  "ExecutionId": null,
+  "Progress01": 1.0,
+  "ErrorMessage": null,
+  "ErrorNodeName": null,
+  "ErrorNodeType": null,
+  "ErrorNodeId": null,
+  "InputsSnapshot": [
+    {
+      "ParamId": "input_text",
+      "Label": "input_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "make it nighttime",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_image",
+      "Label": "input_image",
+      "ParamType": "image",
+      "SourceType": 1,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": "",
+      "MeshValue": null,
+      "FilePath": "C:\\Users\\matan\\Downloads\\c0a7973b-5481-4af9-88b5-6f6bd07bd7e0.jpg"
+    }
+  ],
+  "OutputsSnapshot": [
+    {
+      "ParamId": "output_image",
+      "Label": "output_image",
+      "ParamType": "image",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": "output_image.png",
+      "MeshValue": null,
+      "FilePath": "C:\\Users\\matan\\AppData\\Roaming\\Blender Foundation\\Blender\\4.4\\scripts\\addons\\Platform_BlenderAddon\\atlas_jobs\\API_ImageEdit\\2026-02-03_15-16-56_fef30b0b\\outputs\\Output_output_image.png"
+    },
+    {
+      "ParamId": "output_text",
+      "Label": "output_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "make it nighttime",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "JobFolderPath": "C:\\Users\\matan\\AppData\\Roaming\\Blender Foundation\\Blender\\4.4\\scripts\\addons\\Platform_BlenderAddon\\atlas_jobs\\API_ImageEdit\\2026-02-03_15-16-56_fef30b0b"
+}

@@ -18,15 +18,8 @@ import tempfile
 import threading
 import time
 import logging
+import uuid
 log = logging.getLogger("atlas_workflow")
-
-# --- Third-Party Imports ---
-# Try to import requests (needs to be installed into Blender's Python env)
-try:
-    import requests
-except ImportError:
-    # This variable will be checked in the operator to prevent errors.
-    requests = None
 
 # --- Blender and Addon-Specific Imports ---
 import bpy
@@ -38,6 +31,11 @@ from .atlas_workflow_state import populate_state_from_definition
 from .workflow_definition import WorkflowDefinition
 from . import workflow_manager
 from . import atlas_workflow_state
+from . import api_client
+from .api_client import AtlasAPIClient, ExecutionStatus
+from . import job_manager
+from .job_manager import JobRecord, JobStatus, ParamSnapshot
+from .job_manager import ExecutionStatus as JobExecutionStatus
 
 
 # -------------------------------------------------------------------
@@ -222,6 +220,152 @@ class ATLAS_OT_RenameWorkflow(bpy.types.Operator):
             self.report({'ERROR'}, "Failed to rename workflow.")
             return {'CANCELLED'}
 
+        return {'FINISHED'}
+
+
+class ATLAS_OT_RefreshJobHistory(Operator):
+    """Refresh the job history list from disk"""
+    bl_idname = "atlas.refresh_job_history"
+    bl_label = "Refresh Job History"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        from datetime import datetime, timezone
+        
+        state = context.window_manager.atlas_workflow_state
+        
+        # Clear existing history
+        state.job_history.clear()
+        state.job_history_index = -1
+        
+        # Load all jobs from disk
+        jobs = job_manager.get_all_jobs()
+        
+        now = datetime.now(timezone.utc)
+        
+        for job in jobs:
+            item = state.job_history.add()
+            item.job_id = job.JobId
+            item.workflow_name = job.WorkflowName
+            item.created_at = job.CreatedAtUtc
+            item.status = job.Status
+            item.job_folder_path = job.JobFolderPath
+            
+            # Calculate display time
+            try:
+                created = datetime.fromisoformat(job.CreatedAtUtc.replace('Z', '+00:00'))
+                age = now - created
+                
+                if age.total_seconds() < 60:
+                    item.created_at_display = "just now"
+                elif age.total_seconds() < 3600:
+                    mins = int(age.total_seconds() / 60)
+                    item.created_at_display = f"{mins}m ago"
+                elif age.total_seconds() < 86400:
+                    hours = int(age.total_seconds() / 3600)
+                    item.created_at_display = f"{hours}h ago"
+                elif age.days == 1:
+                    item.created_at_display = "Yesterday"
+                elif age.days < 7:
+                    item.created_at_display = f"{age.days}d ago"
+                else:
+                    item.created_at_display = created.strftime("%b %d")
+            except:
+                item.created_at_display = "Unknown"
+        
+        self.report({'INFO'}, f"Loaded {len(jobs)} jobs")
+        return {'FINISHED'}
+
+
+class ATLAS_OT_OpenJobFolder(Operator):
+    """Open the job folder in file explorer"""
+    bl_idname = "atlas.open_job_folder"
+    bl_label = "Open Job Folder"
+    bl_options = {'REGISTER'}
+    
+    job_folder_path: StringProperty(
+        description="Path to the job folder"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        import subprocess
+        import sys
+        
+        if not self.job_folder_path or not os.path.exists(self.job_folder_path):
+            self.report({'ERROR'}, "Job folder not found")
+            return {'CANCELLED'}
+        
+        # Open folder in system file explorer
+        if sys.platform == 'win32':
+            os.startfile(self.job_folder_path)
+        elif sys.platform == 'darwin':
+            subprocess.run(['open', self.job_folder_path])
+        else:
+            subprocess.run(['xdg-open', self.job_folder_path])
+        
+        return {'FINISHED'}
+
+
+class ATLAS_OT_ViewJobOutputImage(Operator):
+    """Load and view an image from job output"""
+    bl_idname = "atlas.view_job_output_image"
+    bl_label = "View Image"
+    bl_options = {'REGISTER'}
+    
+    file_path: StringProperty(
+        description="Path to the image file"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if not self.file_path or not os.path.exists(self.file_path):
+            self.report({'ERROR'}, "Image file not found")
+            return {'CANCELLED'}
+        
+        try:
+            # Load the image into Blender
+            img = bpy.data.images.load(self.file_path, check_existing=True)
+            
+            # Open in image editor if possible
+            for area in context.screen.areas:
+                if area.type == 'IMAGE_EDITOR':
+                    area.spaces.active.image = img
+                    self.report({'INFO'}, f"Loaded image: {img.name}")
+                    return {'FINISHED'}
+            
+            # No image editor found, just report success
+            self.report({'INFO'}, f"Loaded image: {img.name} (open Image Editor to view)")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to load image: {e}")
+            return {'CANCELLED'}
+        
+        return {'FINISHED'}
+
+
+class ATLAS_OT_ImportJobOutputMesh(Operator):
+    """Import a mesh from job output"""
+    bl_idname = "atlas.import_job_output_mesh"
+    bl_label = "Import Mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    file_path: StringProperty(
+        description="Path to the mesh file"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if not self.file_path or not os.path.exists(self.file_path):
+            self.report({'ERROR'}, "Mesh file not found")
+            return {'CANCELLED'}
+        
+        try:
+            # Import the GLB file
+            bpy.ops.import_scene.gltf(filepath=self.file_path)
+            self.report({'INFO'}, f"Imported mesh from: {os.path.basename(self.file_path)}")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to import mesh: {e}")
+            return {'CANCELLED'}
+        
         return {'FINISHED'}
 
 
@@ -445,13 +589,24 @@ class ATLAS_OT_ImportOutputMesh(Operator):
 # --- Main Workflow Execution Operator (Modal) ---
 # -------------------------------------------------------------------
 
+# Default polling interval in seconds
+POLL_INTERVAL = 2.0
+
+
 class ATLAS_OT_RunWorkflow(Operator):
     """
     Executes the full Atlas workflow using a modal, background-threaded process.
 
     This operator prepares input data, uploads necessary files, triggers the
-    remote workflow, and then downloads the results. It uses a modal timer to
-    keep the UI responsive and a separate thread for all network operations.
+    remote workflow via async API, polls for completion, and then downloads 
+    the results. It uses a modal timer to keep the UI responsive and a 
+    separate thread for all network operations.
+    
+    NEW API FLOW (async with polling):
+    1. Upload files → get file_ids
+    2. Execute async → get execution_id
+    3. Poll status until completed/failed
+    4. Download output files
     """
     bl_idname = "atlas.run_workflow"
     bl_label = "Run Workflow"
@@ -469,60 +624,88 @@ class ATLAS_OT_RunWorkflow(Operator):
     # main thread's modal() method.
     _done: bool = False
     _error: str | None = None
+    _error_details: str | None = None  # Additional error context (node info)
+    _error_node_name: str | None = None
+    _error_node_type: str | None = None
+    _error_node_id: str | None = None
     _status_message: str = ""
+    _current_status: str = ""  # pending, running, completed, failed
     _import_plan: list = []  # A list of dicts describing downloaded files
     _outputs_result: dict | None = None
-
-    # --- API Helper Methods (run in background thread) ---
-
-    def _api_upload_file(self, base_url: str, version: str, api_id: str, file_path: str) -> str:
-        """Uploads a single file and returns its file_id."""
-        url = f"{base_url}/{version}/upload/{api_id}"
-        file_name = os.path.basename(file_path)
-        with open(file_path, "rb") as f:
-            files = {"file": (file_name, f)}
-            resp = requests.post(url, files=files, timeout=300)
-        resp.raise_for_status()
-        return resp.json()["file_id"]
-
-    def _api_download_file(self, base_url: str, version: str, api_id: str, file_id: str, output_path: str) -> None:
-        """Downloads a single file and saves it to the output_path."""
-        url = f"{base_url}/{version}/download_binary_result/{api_id}/{file_id}"
-        resp = requests.get(url, timeout=300)
-        resp.raise_for_status()
-        with open(output_path, "wb") as f:
-            f.write(resp.content)
+    
+    # --- Job Persistence ---
+    _job: JobRecord | None = None
+    
+    # --- Running Job UI Tracking ---
+    _running_job_id: str = ""  # ID to find this job in running_jobs collection
+    _workflow_name: str = ""  # Store workflow name for UI
 
     # --- Orchestrator (runs in background thread) ---
 
-    def _job_thread(self, state_data: dict, payload: dict, upload_plan: list, output_file_types: dict):
+    def _job_thread(self, client: AtlasAPIClient, api_id: str, payload: dict, 
+                    upload_plan: list, output_file_types: dict):
         """
-        Orchestrates the entire API flow in the background.
-        This method handles uploading, execution, and downloading.
+        Orchestrates the entire API flow in the background using the new async pattern.
+        
+        Flow:
+        1. Upload files → get file_ids
+        2. Execute async → get execution_id  
+        3. Poll status until completed/failed
+        4. Download output files
         """
         try:
-            base_url = state_data['base_url']
-            version = state_data['version']
-            api_id = state_data['api_id']
-
             # STAGE 1: UPLOAD FILES
             if upload_plan:
                 for i, item in enumerate(upload_plan):
                     self._status_message = f"Uploading {os.path.basename(item['path'])} ({i + 1}/{len(upload_plan)})..."
-                    file_id = self._api_upload_file(base_url, version, api_id, item['path'])
+                    file_id = client.upload_file(api_id, item['path'])
                     payload[item['param_id']] = file_id  # Replace local path with remote file_id
+                    log.info(f"[Atlas] Uploaded {item['param_id']}: {file_id}")
 
-            # STAGE 2: EXECUTE WORKFLOW
-            self._status_message = "Executing remote workflow..."
-            execute_url = f"{base_url}/{version}/api_execute/{api_id}"
-            resp = requests.post(execute_url, json=payload, timeout=600)
-            resp.raise_for_status()
-            outputs = resp.json().get("outputs", {})
-            self._outputs_result = outputs
+            # STAGE 2: EXECUTE WORKFLOW (ASYNC)
+            self._status_message = "Submitting workflow..."
+            self._current_status = "pending"
+            execution_id = client.execute_async(api_id, payload)
+            log.info(f"[Atlas] Execution started: {execution_id}")
 
-            # STAGE 3: DOWNLOAD RESULTING FILES
+            # STAGE 3: POLL FOR COMPLETION
+            self._status_message = "Waiting for execution..."
+            while True:
+                time.sleep(POLL_INTERVAL)
+                
+                result = client.poll_status(execution_id)
+                self._current_status = result.status.value
+                
+                # Update status message based on state
+                if result.status == ExecutionStatus.PENDING:
+                    self._status_message = "Queued, waiting to start..."
+                elif result.status == ExecutionStatus.RUNNING:
+                    self._status_message = "Workflow running..."
+                
+                log.debug(f"[Atlas] Poll status: {result.status.value}")
+                
+                # Check for terminal states
+                if result.is_failed:
+                    error_msg = "Workflow execution failed"
+                    if result.error:
+                        error_msg = result.error.format_message()
+                        self._error_details = f"Node: {result.error.node_name or 'unknown'}"
+                        self._error_node_name = result.error.node_name
+                        self._error_node_type = result.error.node_type
+                        self._error_node_id = result.error.node_id
+                    raise RuntimeError(error_msg)
+                
+                if result.is_complete:
+                    self._outputs_result = result.outputs
+                    log.info(f"[Atlas] Execution completed. Outputs: {list(result.outputs.keys())}")
+                    break
+
+            # STAGE 4: DOWNLOAD RESULTING FILES
             self._import_plan = []
-            output_ids_to_download = {k: v for k, v in outputs.items() if k in output_file_types}
+            output_ids_to_download = {
+                k: v for k, v in self._outputs_result.items() 
+                if k in output_file_types and v  # Only download if we have a file_id
+            }
 
             if output_ids_to_download:
                 count = len(output_ids_to_download)
@@ -532,15 +715,23 @@ class ATLAS_OT_RunWorkflow(Operator):
                     ext = ".png" if file_type == 'IMAGE' else ".glb"
                     temp_path = os.path.join(self._temp_dir, f"{param_id}{ext}")
 
-                    self._api_download_file(base_url, version, api_id, file_id, temp_path)
-                    self._import_plan.append({'param_id': param_id, 'type': file_type, 'path': temp_path})
+                    client.download_file(api_id, file_id, temp_path)
+                    self._import_plan.append({
+                        'param_id': param_id, 
+                        'type': file_type, 
+                        'path': temp_path
+                    })
+                    log.info(f"[Atlas] Downloaded {param_id} to {temp_path}")
 
             self._status_message = "Workflow finished successfully."
+            self._current_status = "completed"
 
         except Exception as e:
             # If anything goes wrong, record the error for the main thread.
             self._error = str(e)
             self._status_message = f"Error: {e}"
+            self._current_status = "failed"
+            log.error(f"[Atlas] Job failed: {e}")
         finally:
             # Signal to the main thread that the job is done.
             self._done = True
@@ -549,8 +740,9 @@ class ATLAS_OT_RunWorkflow(Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Prepares data, starts the background thread, and enters modal mode."""
-        if requests is None:
-            self.report({'ERROR'}, "Python 'requests' module not installed. Please check addon preferences.")
+        # Check if api_client module is available
+        if not api_client.is_requests_available():
+            self.report({'ERROR'}, "Python 'requests' module not installed. Please install it in Blender's Python.")
             return {'CANCELLED'}
 
         state = context.window_manager.atlas_workflow_state
@@ -563,8 +755,11 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._temp_dir = tempfile.mkdtemp(prefix="atlas_workflow_")
         payload = {}
         upload_plan = []
-        output_file_types = {p.param_id: p.param_type.upper() for p in state.outputs if
-                             p.param_type in ('image', 'mesh')}
+        output_file_types = {
+            p.param_id: p.param_type.upper() 
+            for p in state.outputs 
+            if p.param_type in ('image', 'mesh')
+        }
 
         # --- 2. Build payload and upload plan from input parameters ---
         try:
@@ -585,29 +780,76 @@ class ATLAS_OT_RunWorkflow(Operator):
             shutil.rmtree(self._temp_dir)
             return {'CANCELLED'}
 
-        # --- 3. Start the background job and modal timer ---
-        state.job_running = True
+        # --- 3. Create API client ---
+        base_url = state.base_url.strip()
+        try:
+            client = AtlasAPIClient(
+                base_url=base_url,
+                version=state.version,
+                timeout=300  # TODO: Make configurable in preferences
+            )
+        except RuntimeError as e:
+            self.report({'ERROR'}, str(e))
+            shutil.rmtree(self._temp_dir)
+            return {'CANCELLED'}
+
+        # --- 4. Create job record for persistence ---
+        inputs_snapshot = self._create_inputs_snapshot(state)
+        self._job = job_manager.create_job(
+            workflow_id=state.active_api_id,
+            workflow_name=state.active_name,
+            workflow_version=state.version,
+            inputs_snapshot=inputs_snapshot
+        )
+        log.info(f"[Atlas] Created job record: {self._job.JobId[:8]}")
+
+        # --- 5. Start the background job and modal timer ---
         self._done = False
         self._error = None
+        self._error_details = None
+        self._error_node_name = None
+        self._error_node_type = None
+        self._error_node_id = None
         self._import_plan = []
+        self._outputs_result = None
         self._status_message = "Initializing..."
+        self._current_status = "pending"
         self._start_time = time.time()
+        
+        # Store workflow name for this job
+        self._workflow_name = state.active_name
+        
+        # Set formatted start time for UI display
+        from datetime import datetime
+        started_at = datetime.now().strftime("%H:%M:%S")
+        
+        # Add this job to the running_jobs collection
+        self._running_job_id = self._job.JobId if self._job else str(uuid.uuid4())
+        running_job = state.running_jobs.add()
+        running_job.job_id = self._running_job_id
+        running_job.workflow_name = self._workflow_name
+        running_job.status = "Initializing..."
+        running_job.progress = 0.0
+        running_job.started_at = started_at
+        running_job.elapsed_time = "0.0s"
+        running_job.current_phase = "pending"
+        
+        # Legacy single-job state (for backwards compatibility)
+        state.job_running = True
+        state.job_started_at = started_at
 
-        base = state.base_url.strip().rstrip("/")
-        state_data = {
-            'base_url': f"https://{base}" if not base.startswith('http') else base,
-            'version': state.version,
-            'api_id': state.active_api_id,
-        }
-
-        # Start the background thread
-        self._thread = threading.Thread(target=self._job_thread,
-                                        args=(state_data, payload, upload_plan, output_file_types))
+        # Start the background thread with the new API client
+        self._thread = threading.Thread(
+            target=self._job_thread,
+            args=(client, state.active_api_id, payload, upload_plan, output_file_types)
+        )
         self._thread.start()
 
         # Start the modal timer to check for thread completion
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
         context.window_manager.modal_handler_add(self)
+        
+        log.info(f"[Atlas] Started workflow execution: {state.active_name}")
         return {'RUNNING_MODAL'}
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
@@ -624,33 +866,79 @@ class ATLAS_OT_RunWorkflow(Operator):
             # --- JOB FINISHED ---
             wm = context.window_manager
             wm.event_timer_remove(self._timer)
-            state.job_running = False
+            
+            # Remove this job from running_jobs collection
+            self._remove_running_job(state)
+            
+            # Update legacy state
+            state.job_running = len(state.running_jobs) > 0
 
             if self._error:
                 # Handle errors from the background thread
                 state.job_status = self._status_message
-                self.report({'ERROR'}, state.job_status)
+                error_report = self._error
+                if self._error_details:
+                    error_report += f" ({self._error_details})"
+                
+                # Fail the job record
+                if self._job:
+                    job_manager.fail_job(
+                        self._job,
+                        error_message=self._error,
+                        node_name=self._error_node_name,
+                        node_type=self._error_node_type,
+                        node_id=self._error_node_id
+                    )
+                
+                self.report({'ERROR'}, f"{self._workflow_name}: {error_report}")
+                log.error(f"[Atlas] Workflow failed: {error_report}")
+                
+                # Refresh job history so failed job appears
+                bpy.ops.atlas.refresh_job_history()
+                
+                redraw_view3d_ui()
                 return {'CANCELLED'}
 
             # --- SUCCESS: Update state and import results ---
             self._update_primitive_outputs(state)
             self._process_import_plan(state)
+            
+            # Complete the job record with outputs
+            if self._job:
+                outputs_snapshot = self._create_outputs_snapshot(state)
+                job_manager.complete_job(self._job, outputs_snapshot)
 
             state.job_status = "Workflow complete"
             state.job_progress = 1.0
-            self.report({'INFO'}, "Workflow executed successfully.")
+            self.report({'INFO'}, f"{self._workflow_name}: Completed successfully")
+            log.info(f"[Atlas] Workflow {self._workflow_name} completed successfully")
+            
+            # Refresh job history so completed job appears
+            bpy.ops.atlas.refresh_job_history()
+            
             redraw_view3d_ui()
             return {'FINISHED'}
 
         else:
             # --- JOB STILL RUNNING ---
             elapsed = time.time() - self._start_time
-            state.job_elapsed_time = f"{elapsed:.1f}s"
+            elapsed_str = f"{elapsed:.1f}s"
+            
+            # Calculate progress for UI
+            if self._current_status == "running":
+                spinner_period = 2.0
+                progress = 0.2 + 0.6 * ((elapsed % spinner_period) / spinner_period)
+            else:
+                spinner_period = 3.0
+                progress = 0.1 * ((elapsed % spinner_period) / spinner_period)
+            
+            # Update running_job entry in collection
+            self._update_running_job(state, self._status_message, progress, elapsed_str, self._current_status)
+            
+            # Legacy state update
+            state.job_elapsed_time = elapsed_str
             state.job_status = self._status_message
-
-            # Create a pulsing progress bar effect
-            spinner_period = 1.5
-            state.job_progress = (elapsed % spinner_period) / spinner_period
+            state.job_progress = progress
 
             redraw_view3d_ui()
             return {'RUNNING_MODAL'}
@@ -659,8 +947,32 @@ class ATLAS_OT_RunWorkflow(Operator):
         """Called when the operator is cancelled (e.g., by pressing ESC)."""
         if self._timer:
             context.window_manager.event_timer_remove(self._timer)
+        state = context.window_manager.atlas_workflow_state
+        
+        # Remove this job from running_jobs
+        self._remove_running_job(state)
+        state.job_running = len(state.running_jobs) > 0
+        
+        log.info(f"[Atlas] Workflow {self._workflow_name} cancelled by user")
         # Note: The background thread is not forcefully stopped, but it will
         # complete without affecting the Blender state further.
+
+    def _update_running_job(self, state, status: str, progress: float, elapsed: str, phase: str):
+        """Update this job's entry in the running_jobs collection."""
+        for job in state.running_jobs:
+            if job.job_id == self._running_job_id:
+                job.status = status
+                job.progress = progress
+                job.elapsed_time = elapsed
+                job.current_phase = phase
+                break
+
+    def _remove_running_job(self, state):
+        """Remove this job from the running_jobs collection."""
+        for i, job in enumerate(state.running_jobs):
+            if job.job_id == self._running_job_id:
+                state.running_jobs.remove(i)
+                break
 
     # --- Helper methods for execute() and modal() ---
 
@@ -713,7 +1025,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                     elif out_param.param_type == "string":
                         out_param.string_value = str(value)
                 except (ValueError, TypeError) as e:
-                    log.warning(f"[AtlasWorkflow] Could not set output '{out_param.param_id}': {e}")
+                    log.warning(f"[Atlas] Could not set output '{out_param.param_id}': {e}")
 
     def _process_import_plan(self, state):
         """Processes the downloaded files, importing them into Blender."""
@@ -727,13 +1039,79 @@ class ATLAS_OT_RunWorkflow(Operator):
                     img = bpy.data.images.load(item['path'])
                     img.pack()  # Pack into the .blend file
                     out_param.image_name = img.name
+                    out_param.temp_file_path = item['path']  # Store for job persistence
                 except Exception as e:
-                    log.warning(f"Error importing image for {item['param_id']}: {e}")
+                    log.warning(f"[Atlas] Error importing image for {item['param_id']}: {e}")
 
             elif item['type'] == 'MESH':
                 # For meshes, just store the path. The user can import it via a button.
                 out_param.temp_file_path = item['path']
                 out_param.mesh_name = f"Result: {out_param.label}"
+
+    def _create_inputs_snapshot(self, state) -> list:
+        """Create a snapshot of all input parameters for job persistence."""
+        snapshots = []
+        for item in state.inputs:
+            snapshot = ParamSnapshot(
+                ParamId=item.param_id,
+                Label=item.label,
+                ParamType=item.param_type,
+                SourceType=0 if item.source_type == 'SCENE' else 1,
+            )
+            
+            # Set values based on type
+            if item.param_type == "boolean":
+                snapshot.BoolValue = item.bool_value
+            elif item.param_type == "number":
+                snapshot.NumberValue = item.number_value
+            elif item.param_type == "string":
+                snapshot.StringValue = item.string_value
+            elif item.param_type == "image":
+                snapshot.ImageValue = item.image_name
+                snapshot.FilePath = item.file_path if item.source_type == 'FILE' else None
+            elif item.param_type == "mesh":
+                snapshot.MeshValue = item.mesh_name
+                snapshot.FilePath = item.file_path if item.source_type == 'FILE' else None
+            
+            snapshots.append(snapshot)
+        return snapshots
+
+    def _create_outputs_snapshot(self, state) -> list:
+        """Create a snapshot of all output parameters after job completion."""
+        snapshots = []
+        for item in state.outputs:
+            snapshot = ParamSnapshot(
+                ParamId=item.param_id,
+                Label=item.label,
+                ParamType=item.param_type,
+            )
+            
+            # Set values based on type
+            if item.param_type == "boolean":
+                snapshot.BoolValue = item.bool_value
+            elif item.param_type == "number":
+                snapshot.NumberValue = item.number_value
+            elif item.param_type == "string":
+                snapshot.StringValue = item.string_value
+            elif item.param_type == "image":
+                snapshot.ImageValue = item.image_name
+                # Save output file to job folder
+                if self._job and item.temp_file_path:
+                    saved_path = job_manager.save_output_file_to_job(
+                        self._job, item.param_id, item.temp_file_path
+                    )
+                    snapshot.FilePath = saved_path
+            elif item.param_type == "mesh":
+                snapshot.MeshValue = item.mesh_name
+                # Save output file to job folder
+                if self._job and item.temp_file_path:
+                    saved_path = job_manager.save_output_file_to_job(
+                        self._job, item.param_id, item.temp_file_path
+                    )
+                    snapshot.FilePath = saved_path
+            
+            snapshots.append(snapshot)
+        return snapshots
 
 
 # -------------------------------------------------------------------
@@ -751,7 +1129,11 @@ classes = (
     ATLAS_OT_SaveOutputImage,
     ATLAS_OT_ImportOutputMesh,
     ATLAS_OT_RunWorkflow,
-    ATLAS_OT_PickInputFile
+    ATLAS_OT_PickInputFile,
+    ATLAS_OT_RefreshJobHistory,
+    ATLAS_OT_OpenJobFolder,
+    ATLAS_OT_ViewJobOutputImage,
+    ATLAS_OT_ImportJobOutputMesh,
 )
 
 

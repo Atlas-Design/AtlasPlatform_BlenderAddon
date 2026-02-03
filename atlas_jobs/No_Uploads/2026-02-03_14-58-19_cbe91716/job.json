@@ -1,0 +1,93 @@
+{
+  "JobId": "cbe91716-0d20-4768-83e5-a022080da587",
+  "WorkflowId": "f6166de3-9a32-4e34-bc58-47dd97dfb9f4",
+  "WorkflowName": "No_Uploads",
+  "WorkflowVersion": "0.1",
+  "CreatedAtUtc": "2026-02-03T14:58:19.643199+00:00",
+  "CompletedAtUtc": "2026-02-03T14:58:46.622859+00:00",
+  "Status": 2,
+  "ExecutionStatus": 3,
+  "ExecutionId": null,
+  "Progress01": 1.0,
+  "ErrorMessage": null,
+  "ErrorNodeName": null,
+  "ErrorNodeType": null,
+  "ErrorNodeId": null,
+  "InputsSnapshot": [
+    {
+      "ParamId": "input_boolean",
+      "Label": "input_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": true,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_number",
+      "Label": "input_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 11.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "input_text",
+      "Label": "input_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "schemas",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "OutputsSnapshot": [
+    {
+      "ParamId": "output_boolean",
+      "Label": "output_boolean",
+      "ParamType": "boolean",
+      "SourceType": 0,
+      "BoolValue": true,
+      "NumberValue": 0.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_text",
+      "Label": "output_text",
+      "ParamType": "string",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 0.0,
+      "StringValue": "Here are some schema-themed jokes:\n\n- Why did the database break up with its schema? It needed more space; the schema said, \u201cYou can\u2019t just change my type!\u201d\n- A schema walks into a bar. Bartender: \u201cWe don\u2019t serve your type.\u201d Schema: \u201cRelax, I\u2019m just here to define the fields.\u201d\n- I don\u2019t always validate JSON, but when I do, I do it strictly and judge your commas.\n- I added schema markup to my dating profile\u2014still no rich results, just poor impressions.\n- Went to schema therapy. Turns out my core belief was VARCHAR(20) and I have commitment issues with NOT NULL.\n- Our relationship has constraints. I\u2019m foreign-key dependent; you\u2019re primary-key independent.\n- I tried mapping my feelings to a schema\u2014turns out they\u2019re unstructured data with eventual consistency.\n- My love life is NoSQL: no schema, lots of flexibility, zero joins.\n- Told my schema we\u2019re migrating. It said, \u201cALTER my ego gently.\u201d\n- I normalized my life to 3NF\u2014no redundancy, no friends, perfect isolation.\n- My calendar must allow NULLs, because it\u2019s always empty.\n- I added indexes to my jokes\u2014still no quick laughs; must be a cardinality issue.\n- You\u2019re my primary key\u2014unique, not null, and everyone references you.\n- I trust CSVs without a schema. I like to live on the edge of the delimiter.\n- Tried to model my social graph; turns out I\u2019m a tree. No cycles, no parties.",
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    },
+    {
+      "ParamId": "output_number",
+      "Label": "output_number",
+      "ParamType": "number",
+      "SourceType": 0,
+      "BoolValue": false,
+      "NumberValue": 21.0,
+      "StringValue": null,
+      "ImageValue": null,
+      "MeshValue": null,
+      "FilePath": null
+    }
+  ],
+  "JobFolderPath": "C:\\Users\\matan\\AppData\\Roaming\\Blender Foundation\\Blender\\4.4\\scripts\\addons\\Platform_BlenderAddon\\atlas_jobs\\No_Uploads\\2026-02-03_14-58-19_cbe91716"
+}

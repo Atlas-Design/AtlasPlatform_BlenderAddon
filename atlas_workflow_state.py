@@ -40,6 +40,73 @@ from . import workflow_manager
 # --- Property Groups ---
 # -------------------------------------------------------------------
 
+class AtlasJobHistoryItem(PropertyGroup):
+    """
+    Represents a single job in the history list.
+    Lightweight summary data loaded from job.json files.
+    """
+    job_id: StringProperty(name="Job ID")
+    workflow_name: StringProperty(name="Workflow Name")
+    created_at: StringProperty(name="Created At")  # ISO format for sorting
+    created_at_display: StringProperty(name="Display Time")  # "just now", "5m ago", etc.
+    status: IntProperty(name="Status", default=0)  # 0=pending, 1=running, 2=completed, 3=failed
+    job_folder_path: StringProperty(name="Job Folder Path", subtype='DIR_PATH')
+    
+    def get_status_icon(self) -> str:
+        """Return appropriate icon for status."""
+        if self.status == 2:  # Completed
+            return 'CHECKMARK'
+        elif self.status == 3:  # Failed
+            return 'ERROR'
+        elif self.status == 1:  # Running
+            return 'TIME'
+        return 'PAUSE'  # Pending
+    
+    def get_status_name(self) -> str:
+        """Return status as string."""
+        names = {0: "Pending", 1: "Running", 2: "Completed", 3: "Failed", 4: "Cancelled"}
+        return names.get(self.status, "Unknown")
+
+
+class AtlasRunningJobItem(PropertyGroup):
+    """
+    Represents a single running job in the Running Jobs panel.
+    Multiple jobs can run concurrently on the server.
+    """
+    job_id: StringProperty(
+        name="Job ID",
+        description="Unique identifier for this running job"
+    )
+    workflow_name: StringProperty(
+        name="Workflow Name",
+        description="Name of the workflow being executed"
+    )
+    status: StringProperty(
+        name="Status",
+        description="Current status message",
+        default="Initializing..."
+    )
+    progress: FloatProperty(
+        name="Progress",
+        description="Job progress 0.0 to 1.0",
+        default=0.0, min=0.0, max=1.0
+    )
+    started_at: StringProperty(
+        name="Started At",
+        description="Time when job started (HH:MM:SS)"
+    )
+    elapsed_time: StringProperty(
+        name="Elapsed Time",
+        description="Time elapsed since start",
+        default="0.0s"
+    )
+    current_phase: StringProperty(
+        name="Current Phase",
+        description="Current execution phase: pending, running, uploading, downloading",
+        default="pending"
+    )
+
+
 class AtlasWorkflowParamState(PropertyGroup):
     """
     Holds the current value and configuration for a single workflow parameter.
@@ -138,10 +205,81 @@ class AtlasWorkflowState(PropertyGroup):
         description="Collection of output parameters for the workflow"
     )
 
-    # --- Job Status ---
+    # --- Running Jobs (supports multiple concurrent jobs) ---
+    running_jobs: CollectionProperty(
+        type=AtlasRunningJobItem,
+        description="Collection of currently running jobs"
+    )
+    
+    # --- Job History ---
+    job_history: CollectionProperty(
+        type=AtlasJobHistoryItem,
+        description="Collection of past jobs for history panel"
+    )
+    job_history_index: IntProperty(
+        name="Selected Job",
+        description="Index of selected job in history list",
+        default=-1
+    )
+    
+    # Filter properties with update callbacks to trigger refresh
+    def _on_filter_changed(self, context):
+        """Called when any filter changes - triggers UI refresh."""
+        # Force redraw of the UI
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+    
+    filter_status: EnumProperty(
+        name="Status Filter",
+        description="Filter jobs by status",
+        items=[
+            ('ALL', "All", "Show all jobs"),
+            ('COMPLETED', "Success", "Show only completed jobs"),
+            ('FAILED', "Failed", "Show only failed jobs"),
+            ('RUNNING', "Running", "Show only running jobs"),
+        ],
+        default='ALL',
+        update=_on_filter_changed
+    )
+    
+    def _get_workflow_filter_items(self, context):
+        """Dynamically generate workflow filter items from job history."""
+        items = [('ALL', "All Workflows", "Show all workflows")]
+        
+        # Get unique workflow names from job history
+        seen = set()
+        for job in self.job_history:
+            if job.workflow_name and job.workflow_name not in seen:
+                seen.add(job.workflow_name)
+                items.append((job.workflow_name, job.workflow_name, f"Show only {job.workflow_name} jobs"))
+        
+        return items
+    
+    filter_workflow: EnumProperty(
+        name="Workflow Filter",
+        description="Filter by workflow type",
+        items=_get_workflow_filter_items,
+        update=_on_filter_changed
+    )
+    
+    filter_date: EnumProperty(
+        name="Date Filter",
+        description="Filter jobs by date",
+        items=[
+            ('ALL', "All Time", "Show all jobs"),
+            ('TODAY', "Today", "Show jobs from today"),
+            ('WEEK', "Last 7 Days", "Show jobs from last 7 days"),
+            ('MONTH', "Last 30 Days", "Show jobs from last 30 days"),
+        ],
+        default='ALL',
+        update=_on_filter_changed
+    )
+    
+    # Legacy single-job properties (kept for backwards compatibility during transition)
     job_running: BoolProperty(
         default=False,
-        description="True if a workflow job is currently executing"
+        description="True if at least one job is currently executing"
     )
     job_status: StringProperty(
         default="",
@@ -154,6 +292,10 @@ class AtlasWorkflowState(PropertyGroup):
     job_elapsed_time: StringProperty(
         default="0.0s",
         description="The elapsed time since the job started"
+    )
+    job_started_at: StringProperty(
+        default="",
+        description="Formatted time when the job started (HH:MM:SS)"
     )
 
     active_workflow_filepath: StringProperty(
@@ -286,42 +428,14 @@ def populate_state_from_definition(
         item.label = p.id  # Outputs typically use their ID as the label
         item.param_type = p.type.value
 
-    collapse_details_panel(context)
-
-
-def collapse_details_panel(context: bpy.types.Context):
-    """
-    Finds and collapses the Workflow Details panel in all 3D View sidebars.
-
-    Blender stores the collapsed state of a panel in the screen's space data.
-    We need to iterate through the UI areas to find the panel and set its state.
-    """
-    panel_idname = "ATLAS_PT_workflow_details_panel"
-
-    if not context or not context.screen:
-        return
-
-    # Iterate through all 3D views in all windows
-    for window in context.window_manager.windows:
-        for area in window.screen.areas:
-            if area.type == 'VIEW_3D':
-                for region in area.regions:
-                    if region.type == 'UI':
-                        # The 'show_expanded' property is what we need to set
-                        # It's stored in the region's 'data' attribute
-                        if hasattr(region.data, 'show_expanded'):
-                            # Find the panel by its idname
-                            for panel in region.data.panels:
-                                if panel.bl_idname == panel_idname:
-                                    panel.show_expanded = False
-                                    break
-                        break  # Move to the next area
 
 # -------------------------------------------------------------------
 # --- Blender Registration ---
 # -------------------------------------------------------------------
 
 classes = (
+    AtlasJobHistoryItem,  # Must be registered before AtlasWorkflowState
+    AtlasRunningJobItem,  # Must be registered before AtlasWorkflowState
     AtlasWorkflowParamState,
     AtlasWorkflowState,
 )
