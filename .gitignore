@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local workflow library and run history.
+atlas_workflows/
+atlas_jobs/
+
+# Editor and OS files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Blender backup files.
+*.blend1
+*.blend2
