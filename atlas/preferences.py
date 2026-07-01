@@ -25,10 +25,21 @@ from bpy.props import (
 import os
 import logging
 
-from . import job_manager
+try:
+    from . import job_manager
+except ImportError:
+    import job_manager
 
 log = logging.getLogger("atlas_workflow")
-ADDON_PACKAGE = __package__.split(".")[0]
+ADDON_PACKAGE = __package__.split(".")[0] if __package__ else __name__
+
+
+def set_addon_package(package_name: str) -> None:
+    """Set the Blender addon module id used for preferences lookup."""
+    global ADDON_PACKAGE
+    if package_name:
+        ADDON_PACKAGE = package_name
+        AtlasAddonPreferences.bl_idname = package_name
 
 
 # ---------------------------------------------------------------------------

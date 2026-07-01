@@ -16,9 +16,14 @@ parameter type, keeping the panel classes clean and focused.
 import os
 import bpy
 from datetime import datetime, timezone, timedelta
-from . import custom_icons
-from . import workflow_manager
-from . import job_manager
+try:
+    from . import custom_icons
+    from . import workflow_manager
+    from . import job_manager
+except ImportError:
+    import custom_icons
+    import workflow_manager
+    import job_manager
 
 
 def draw_collapsible_box(layout, state, prop_name: str, label: str, icon: str):

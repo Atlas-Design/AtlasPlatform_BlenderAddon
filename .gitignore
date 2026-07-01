@@ -6,6 +6,10 @@ __pycache__/
 atlas_workflows/
 atlas_jobs/
 
+# Local release packaging output.
+dist/
+release-staging/
+
 # Local planning/reference docs.
 ROADMAP.md
 docs/

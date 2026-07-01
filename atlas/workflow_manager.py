@@ -17,7 +17,10 @@ log = logging.getLogger("atlas_workflow")
 
 def get_addon_root_dir() -> str:
     """Return the installable addon package root directory."""
-    return os.path.dirname(os.path.dirname(__file__))
+    module_dir = os.path.dirname(__file__)
+    if os.path.basename(module_dir) == "atlas":
+        return os.path.dirname(module_dir)
+    return module_dir
 
 # --- Directory Management ---
 

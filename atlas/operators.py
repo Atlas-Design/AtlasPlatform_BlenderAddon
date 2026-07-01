@@ -27,16 +27,28 @@ from bpy.props import StringProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 
-from .atlas_workflow_state import populate_state_from_definition
-from .workflow_definition import WorkflowDefinition
-from . import workflow_manager
-from . import atlas_workflow_state
-from . import api_client
-from .api_client import AtlasAPIClient, ExecutionStatus
-from . import job_manager
-from .job_manager import JobRecord, JobStatus, ParamSnapshot
-from .job_manager import ExecutionStatus as JobExecutionStatus
-from . import preferences
+try:
+    from .atlas_workflow_state import populate_state_from_definition
+    from .workflow_definition import WorkflowDefinition
+    from . import workflow_manager
+    from . import atlas_workflow_state
+    from . import api_client
+    from .api_client import AtlasAPIClient, ExecutionStatus
+    from . import job_manager
+    from .job_manager import JobRecord, JobStatus, ParamSnapshot
+    from .job_manager import ExecutionStatus as JobExecutionStatus
+    from . import preferences
+except ImportError:
+    from atlas_workflow_state import populate_state_from_definition
+    from workflow_definition import WorkflowDefinition
+    import workflow_manager
+    import atlas_workflow_state
+    import api_client
+    from api_client import AtlasAPIClient, ExecutionStatus
+    import job_manager
+    from job_manager import JobRecord, JobStatus, ParamSnapshot
+    from job_manager import ExecutionStatus as JobExecutionStatus
+    import preferences
 
 
 # -------------------------------------------------------------------
@@ -932,7 +944,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         """Prepares data, starts the background thread, and enters modal mode."""
         # Check if api_client module is available
         if not api_client.is_requests_available():
-            self.report({'ERROR'}, "Python 'requests' module not installed. Please install it in Blender's Python.")
+            self.report({'ERROR'}, "Bundled HTTP client missing. Reinstall the complete Atlas addon package.")
             return {'CANCELLED'}
 
         state = context.window_manager.atlas_workflow_state

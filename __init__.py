@@ -22,18 +22,76 @@ bl_info = {
     "doc_url": "",  # Optional: Add a link to your documentation
 }
 
+import logging
+import importlib
+import os
+import sys
+
 # --- Submodule Imports ---
 # Instead of importing every class, we import the registration functions
 # from each module. This keeps the __init__.py file clean.
 
-from .atlas import preferences
-from .atlas import atlas_workflow_state
-from .atlas import custom_icons
-from .atlas import operators
-from .atlas import ui_panel
+_MODULE_NAMES = (
+    "preferences",
+    "atlas_workflow_state",
+    "custom_icons",
+    "operators",
+    "ui_panel",
+)
 
-import logging
+
+def _import_modules_from(prefix):
+    """Import addon modules from a package prefix or from the top level."""
+    modules = []
+    for module_name in _MODULE_NAMES:
+        qualified_name = f"{prefix}.{module_name}" if prefix else module_name
+        modules.append(importlib.import_module(qualified_name))
+    return modules
+
+
+def _is_missing_candidate_module(exc, prefix):
+    """Return true when an import attempt failed because this layout is absent."""
+    if not isinstance(exc, ModuleNotFoundError):
+        return False
+    candidate_names = {f"{prefix}.{name}" if prefix else name for name in _MODULE_NAMES}
+    if prefix:
+        candidate_names.add(prefix)
+    return exc.name in candidate_names
+
+
+def _import_addon_modules():
+    """Import addon modules from flat release layout or source atlas layout."""
+    addon_dir = os.path.dirname(os.path.abspath(__file__))
+    if addon_dir not in sys.path:
+        sys.path.insert(0, addon_dir)
+
+    prefixes = []
+    if __package__:
+        prefixes.extend((__package__, f"{__package__}.atlas"))
+    prefixes.extend(("", "atlas"))
+
+    last_error = None
+    for prefix in prefixes:
+        try:
+            return _import_modules_from(prefix)
+        except ModuleNotFoundError as exc:
+            if not _is_missing_candidate_module(exc, prefix):
+                raise
+            last_error = exc
+            continue
+        except ImportError as exc:
+            if "attempted relative import with no known parent package" not in str(exc):
+                raise
+            last_error = exc
+            continue
+
+    raise last_error or ImportError("Could not import Atlas addon modules.")
+
+
+preferences, atlas_workflow_state, custom_icons, operators, ui_panel = _import_addon_modules()
+
 log = logging.getLogger("atlas_workflow")
+preferences.set_addon_package(__name__)
 
 
 def register():

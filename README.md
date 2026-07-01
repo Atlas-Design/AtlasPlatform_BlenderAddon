@@ -158,29 +158,30 @@ Jobs History is where you review current and past workflow runs. The history pan
 | **Blender** | 4.0 or newer |
 | **Atlas Platform** | Access to workflows exported from your workspace |
 | **Workspace API key** | Required for API v0.2+ workflows. Create one in Atlas **Workspace settings > API Keys**. |
-| **Python `requests`** | Must be available in Blender's Python environment |
+| **Python HTTP dependencies** | Bundled with the addon |
 | **Network access** | The addon calls Atlas Platform over HTTPS |
 
 ---
 
 ## Installation
 
-1. Download or clone this repository.
+1. Download `AtlasPlatform_BlenderAddon.zip` from the [latest GitHub release](https://github.com/Atlas-Design/AtlasPlatform_BlenderAddon/releases/latest/download/AtlasPlatform_BlenderAddon.zip).
 2. In Blender, open **Edit > Preferences > Add-ons**.
-3. Click **Install...** and select the addon folder or zip.
+3. Click **Install...** and select `AtlasPlatform_BlenderAddon.zip`.
 4. Enable **Atlas Workflow Integration**.
 5. Open the 3D View sidebar with `N`, then select the **Atlas** tab.
 
-### Installing `requests`
+The addon bundles its Python HTTP dependencies, so no separate `pip install` step is required for normal use.
 
-If Blender reports that `requests` is missing, install it into Blender's bundled Python. On Windows, the command usually looks like:
+### Packaging a release zip for maintainers
+
+From the addon root on Windows, run:
 
 ```powershell
-"C:\Program Files\Blender Foundation\Blender 4.0\4.0\python\bin\python.exe" -m ensurepip
-"C:\Program Files\Blender Foundation\Blender 4.0\4.0\python\bin\python.exe" -m pip install requests
+scripts\package_release.bat v0.1.0
 ```
 
-Adjust the path for your Blender version and install location.
+The script creates `dist\AtlasPlatform_BlenderAddon.zip`, a clean Blender-installable package with bundled dependencies and portable zip paths. Keep this filename for Blender installs, upload it as the GitHub release asset, and use the GitHub release tag for the version. Test that exact zip in Blender before publishing the release.
 
 ---
 
@@ -330,7 +331,7 @@ Runtime implementation modules are intentionally grouped under `atlas/`; `__init
 
 | Problem | What to try |
 | --- | --- |
-| `requests` is missing | Install `requests` into Blender's Python environment. |
+| HTTP client import fails | Reinstall the addon from a complete release zip so the bundled `vendor/` folder is included. |
 | Workflow JSON will not load | Confirm it includes the required fields and supported parameter types. |
 | Input file is missing | Re-select the image or mesh file in the input row. |
 | Image output is not visible | Use **View**; it creates a textured plane and switches supported viewports to Material Preview. |

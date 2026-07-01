@@ -32,8 +32,12 @@ from bpy.props import (
 from bpy.types import PropertyGroup
 
 # Adjust this import to wherever you put workflow_definition.py
-from .workflow_definition import WorkflowDefinition, ParamType
-from . import workflow_manager
+try:
+    from .workflow_definition import WorkflowDefinition, ParamType
+    from . import workflow_manager
+except ImportError:
+    from workflow_definition import WorkflowDefinition, ParamType
+    import workflow_manager
 
 
 # -------------------------------------------------------------------

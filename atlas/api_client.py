@@ -15,16 +15,32 @@ All functions are designed to be called from a background thread.
 """
 
 import os
+import sys
 import logging
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
 
-# Try to import requests
+
+def get_addon_root_dir() -> str:
+    """Return the addon root for packaged or flat Blender installs."""
+    module_dir = os.path.dirname(__file__)
+    if os.path.basename(module_dir) == "atlas":
+        return os.path.dirname(module_dir)
+    return module_dir
+
+
+# Try Blender's Python first, then fall back to the bundled vendor directory.
 try:
     import requests
 except ImportError:
-    requests = None
+    vendor_dir = os.path.join(get_addon_root_dir(), "vendor")
+    if os.path.isdir(vendor_dir) and vendor_dir not in sys.path:
+        sys.path.insert(0, vendor_dir)
+    try:
+        import requests
+    except ImportError:
+        requests = None
 
 log = logging.getLogger("atlas_workflow")
 
@@ -127,7 +143,9 @@ class AtlasAPIClient:
             api_key: Workspace API key required by platform API v0.2 and newer.
         """
         if requests is None:
-            raise RuntimeError("The 'requests' library is not installed. Please install it to use the Atlas API.")
+            raise RuntimeError(
+                "The bundled HTTP client could not be loaded. Reinstall the addon from a complete release zip."
+            )
         
         # Normalize base URL
         self.base_url = base_url.rstrip("/")
