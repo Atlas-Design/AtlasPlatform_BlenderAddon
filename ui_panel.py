@@ -20,6 +20,23 @@ from . import custom_icons
 from . import workflow_manager
 from . import job_manager
 
+
+def draw_collapsible_box(layout, state, prop_name: str, label: str, icon: str):
+    """Draw a compact collapsible section and return (box, expanded)."""
+    box = layout.box()
+    expanded = bool(getattr(state, prop_name))
+    row = box.row(align=True)
+    row.prop(
+        state,
+        prop_name,
+        text=label,
+        icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
+        emboss=False,
+    )
+    row.label(text="", icon=icon)
+    return box, expanded
+
+
 # -------------------------------------------------------------------
 # --- Base Panel Class ---
 # -------------------------------------------------------------------
@@ -33,7 +50,7 @@ class ATLAS_PT_BasePanel(bpy.types.Panel):
     """
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "MLXAR"  # This creates the "Atlas" tab in the sidebar
+    bl_category = "Atlas"
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -63,7 +80,7 @@ class ATLAS_PT_RunningJobsPanel(bpy.types.Panel):
     bl_label = "Running Jobs"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "MLXAR"
+    bl_category = "Atlas"
     bl_order = 1  # Appears right after main control panel
 
     @classmethod
@@ -178,7 +195,7 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
     bl_label = "Selected Workflow"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "MLXAR"
+    bl_category = "Atlas"
     bl_order = 2  # Appears below running jobs panel
 
     @classmethod
@@ -191,28 +208,37 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
 
+        if state.job_history_detail_mode and state.job_history_index >= 0:
+            compact_box = layout.box()
+            row = compact_box.row(align=True)
+            row.label(text=state.active_name or "Workflow", icon='FILE_TICK')
+            row.operator("atlas.run_workflow", text="", icon='PLAY')
+            return
+
         # --- INPUTS SECTION ---
         if state.inputs:
-            inputs_box = layout.box()
-            inputs_box.label(text="Inputs", icon='IMPORT')
-            
-            for item in state.inputs:
-                draw_input_param(context, inputs_box, item)
+            inputs_box, expanded = draw_collapsible_box(
+                layout, state, "selected_inputs_expanded", "Inputs", 'IMPORT'
+            )
+            if expanded:
+                for item in state.inputs:
+                    draw_input_param(context, inputs_box, item)
         
         # --- OUTPUTS SECTION (Preview only - disabled) ---
         if state.outputs:
-            outputs_box = layout.box()
-            outputs_box.label(text="Outputs", icon='EXPORT')
-            
-            # Draw outputs as disabled preview (just name + type icon)
-            col = outputs_box.column(align=True)
-            col.enabled = False  # Disable entire section
-            
-            for item in state.outputs:
-                row = col.row(align=True)
-                icon_id = custom_icons.get_icon_id(item.param_type)
-                row.label(text="", icon_value=icon_id)
-                row.label(text=item.label)
+            outputs_box, expanded = draw_collapsible_box(
+                layout, state, "selected_outputs_expanded", f"Outputs ({len(state.outputs)})", 'EXPORT'
+            )
+            if expanded:
+                # Draw outputs as disabled preview (just name + type icon)
+                col = outputs_box.column(align=True)
+                col.enabled = False  # Disable entire section
+                
+                for item in state.outputs:
+                    row = col.row(align=True)
+                    icon_id = custom_icons.get_icon_id(item.param_type)
+                    row.label(text="", icon_value=icon_id)
+                    row.label(text=item.label)
 
         # --- RUN BUTTON ---
         layout.separator()
@@ -310,7 +336,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
     bl_label = "Jobs History"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "MLXAR"
+    bl_category = "Atlas"
     bl_order = 4
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -356,8 +382,8 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             "job_history",
             state,
             "job_history_index",
-            rows=8,
-            maxrows=12,
+            rows=5,
+            maxrows=8,
         )
         
         # Just refresh button at bottom
@@ -372,11 +398,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         
         selected_job = state.job_history[state.job_history_index]
         
-        # Back button - prominent, full width with highlight
-        back_box = layout.box()
-        back_row = back_box.row()
-        back_row.scale_y = 1.3  # Taller button
-        back_row.operator("atlas.back_to_job_list", text="← Back to History", icon='LOOP_BACK')
+        layout.operator("atlas.back_to_job_list", text="← Back to History", icon='LOOP_BACK')
         
         layout.separator()
         
@@ -422,11 +444,12 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         # === OUTPUTS SECTION (with actions) ===
         # Put results before inputs so completed job details surface the useful artifacts first.
         if full_job.OutputsSnapshot:
-            outputs_box = layout.box()
-            outputs_box.label(text="Outputs", icon='EXPORT')
-            
-            for out in full_job.OutputsSnapshot:
-                self._draw_output_param(outputs_box, out, full_job.JobFolderPath)
+            outputs_box, expanded = draw_collapsible_box(
+                layout, state, "job_detail_outputs_expanded", f"Outputs ({len(full_job.OutputsSnapshot)})", 'EXPORT'
+            )
+            if expanded:
+                for out in full_job.OutputsSnapshot:
+                    self._draw_output_param(outputs_box, out, full_job.JobFolderPath)
         elif full_job.Status == 2:  # Completed
             outputs_box = layout.box()
             outputs_box.label(text="Outputs", icon='EXPORT')
@@ -434,14 +457,15 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         
         # === INPUTS SECTION (disabled/read-only) ===
         if full_job.InputsSnapshot:
-            inputs_box = layout.box()
-            inputs_box.label(text="Inputs", icon='IMPORT')
-            
-            inputs_col = inputs_box.column(align=True)
-            inputs_col.enabled = False  # Disable entire section
-            
-            for inp in full_job.InputsSnapshot:
-                self._draw_input_param(inputs_col, inp)
+            inputs_box, expanded = draw_collapsible_box(
+                layout, state, "job_detail_inputs_expanded", f"Inputs ({len(full_job.InputsSnapshot)})", 'IMPORT'
+            )
+            if expanded:
+                inputs_col = inputs_box.column(align=True)
+                inputs_col.enabled = False  # Disable entire section
+                
+                for inp in full_job.InputsSnapshot:
+                    self._draw_input_param(inputs_col, inp)
         
         # === ACTION BUTTONS ===
         layout.separator()
@@ -509,17 +533,16 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             op.value = value_str
             
         elif param_type == 'string':
-            # String: Show the full generated text in a wrapped box.
+            # String: Keep the history compact; open full content in a dialog.
             value = param.get('StringValue', '')
-            row.label(text="Text")
+            preview = value[:32] + "..." if len(value) > 32 else value
+            row.label(text=preview or "(empty)")
             if value:
+                op_view = row.operator("atlas.view_text_output", text="", icon='TEXT')
+                op_view.title = label
+                op_view.value = value
                 op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
                 op.value = value
-                text_box = layout.box()
-                for line in self._wrap_text(value, 48):
-                    text_box.label(text=line)
-            else:
-                row.label(text="(empty)")
                 
         elif param_type == 'image':
             # Image: filename + View/Apply buttons
@@ -528,14 +551,10 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
                 filename = os.path.basename(file_path)
                 row.label(text=filename)
                 
-                # Action buttons on new row for more space
-                actions_row = layout.row(align=True)
-                actions_row.separator()  # Indent
-                
-                op_view = actions_row.operator("atlas.view_job_output_image", text="View", icon='IMAGE_DATA')
+                op_view = row.operator("atlas.view_job_output_image", text="", icon='IMAGE_DATA')
                 op_view.file_path = file_path
                 
-                op_apply = actions_row.operator("atlas.apply_job_output_image", text="Apply", icon='TEXTURE')
+                op_apply = row.operator("atlas.apply_job_output_image", text="", icon='TEXTURE')
                 op_apply.file_path = file_path
             else:
                 row.label(text="(file not found)")
@@ -547,11 +566,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
                 filename = os.path.basename(file_path)
                 row.label(text=filename)
                 
-                # Action buttons on new row
-                actions_row = layout.row(align=True)
-                actions_row.separator()  # Indent
-                
-                op_import = actions_row.operator("atlas.import_job_output_mesh", text="Import", icon='IMPORT')
+                op_import = row.operator("atlas.import_job_output_mesh", text="", icon='IMPORT')
                 op_import.file_path = file_path
             else:
                 row.label(text="(file not found)")

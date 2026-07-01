@@ -282,6 +282,28 @@ class AtlasWorkflowState(PropertyGroup):
         description="True when viewing job details, False when viewing list",
         default=False
     )
+
+    # --- Compact UI State ---
+    selected_inputs_expanded: BoolProperty(
+        name="Inputs",
+        description="Show inputs for the selected workflow",
+        default=True
+    )
+    selected_outputs_expanded: BoolProperty(
+        name="Outputs",
+        description="Show output preview for the selected workflow",
+        default=False
+    )
+    job_detail_outputs_expanded: BoolProperty(
+        name="Outputs",
+        description="Show outputs in the selected job detail",
+        default=True
+    )
+    job_detail_inputs_expanded: BoolProperty(
+        name="Inputs",
+        description="Show inputs in the selected job detail",
+        default=False
+    )
     
     # Legacy single-job properties (kept for backwards compatibility during transition)
     job_running: BoolProperty(
@@ -337,7 +359,7 @@ class AtlasWorkflowState(PropertyGroup):
                     for area in context.screen.areas:
                         area.tag_redraw()
             except Exception as e:
-                self.report({'INFO'}, f"[MLXAR] Failed to load workflow '{workflow_id}': {e}")
+                self.report({'INFO'}, f"[Atlas] Failed to load workflow '{workflow_id}': {e}")
 
         bpy.app.timers.call_soon(lambda: setattr(self, 'saved_workflows_enum', '__NONE__'))
 
@@ -369,6 +391,8 @@ def clear_workflow_state(state: AtlasWorkflowState) -> None:
     state.job_status = ""
     state.job_progress = 0.0
     state.job_elapsed_time = "0.0s"
+    state.selected_inputs_expanded = True
+    state.selected_outputs_expanded = False
 
 
 def populate_state_from_definition(
@@ -460,7 +484,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.WindowManager.atlas_workflow_state = PointerProperty(
-        name="MLXAR Workflow State",
+        name="Atlas Workflow State",
         type=AtlasWorkflowState,
         description="Stores the global state for the Atlas workflow addon",
     )

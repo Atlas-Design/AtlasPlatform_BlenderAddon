@@ -124,7 +124,7 @@ class ATLAS_OT_ClearCache(Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Runs the cleanup utility and reports the result."""
         cleanup_old_temp_dirs()
-        self.report({'INFO'}, "MLXAR  temporary cache cleared.")
+        self.report({'INFO'}, "Atlas temporary cache cleared.")
         return {'FINISHED'}
 
 
@@ -485,6 +485,60 @@ class ATLAS_OT_CopyToClipboard(Operator):
         return {'FINISHED'}
 
 
+class ATLAS_OT_ViewTextOutput(Operator):
+    """Show a full text output in a dialog."""
+    bl_idname = "atlas.view_text_output"
+    bl_label = "View Text Output"
+    bl_options = {'REGISTER'}
+
+    title: StringProperty(
+        default="Text Output",
+        description="Text output label"
+    )
+    value: StringProperty(
+        description="Full text value"
+    )
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+        layout.label(text=self.title, icon='TEXT')
+
+        box = layout.box()
+        lines = self._wrap_text(self.value or "(empty)", 70)
+        for line in lines:
+            box.label(text=line)
+
+        row = layout.row()
+        op = row.operator("atlas.copy_to_clipboard", text="Copy Text", icon='COPYDOWN')
+        op.value = self.value
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        return {'FINISHED'}
+
+    @staticmethod
+    def _wrap_text(text: str, max_chars: int) -> list[str]:
+        wrapped_lines = []
+        for raw_line in text.splitlines() or [""]:
+            words = raw_line.split()
+            if not words:
+                wrapped_lines.append("")
+                continue
+
+            current = ""
+            for word in words:
+                if len(current) + len(word) + 1 <= max_chars:
+                    current += (" " if current else "") + word
+                else:
+                    wrapped_lines.append(current)
+                    current = word
+            if current:
+                wrapped_lines.append(current)
+        return wrapped_lines
+
+
 class ATLAS_OT_SelectJob(Operator):
     """View job details"""
     bl_idname = "atlas.select_job"
@@ -500,6 +554,8 @@ class ATLAS_OT_SelectJob(Operator):
         if 0 <= self.job_index < len(state.job_history):
             state.job_history_index = self.job_index
             state.job_history_detail_mode = True
+            state.job_detail_outputs_expanded = True
+            state.job_detail_inputs_expanded = False
         return {'FINISHED'}
 
 
@@ -517,7 +573,7 @@ class ATLAS_OT_BackToJobList(Operator):
 
 class ATLAS_OT_PickInputFile(Operator, ImportHelper):
     """Select a file with specific format filtering"""
-    bl_idname = "mlxar.pick_input_file"  # Using the new branding
+    bl_idname = "atlas.pick_input_file"
     bl_label = "Select File"
 
     # We pass these arguments from the UI to tell the operator what to look for
@@ -1301,6 +1357,7 @@ classes = (
     ATLAS_OT_ImportJobOutputMesh,
     ATLAS_OT_OpenPreferences,
     ATLAS_OT_CopyToClipboard,
+    ATLAS_OT_ViewTextOutput,
     ATLAS_OT_SelectJob,
     ATLAS_OT_BackToJobList,
 )

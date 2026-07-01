@@ -1,6 +1,6 @@
 # In __init__.py
 """
-The main entry point for the MLXAR Workflow Integration addon.
+The main entry point for the Atlas Workflow Integration addon.
 
 This file defines the addon's metadata (bl_info) and contains the top-level
 register() and unregister() functions that Blender calls when the addon is
@@ -12,13 +12,13 @@ directly. This makes the addon easier to maintain and extend.
 """
 
 bl_info = {
-    "name": "MLXAR Workflow Integration",
-    "author": "MLXAR",
+    "name": "Atlas Workflow Integration",
+    "author": "Atlas",
     "version": (0, 1, 0),
     "blender": (4, 0, 0),
-    "location": "3D View > Sidebar (N-Panel) > MLXAR",
+    "location": "3D View > Sidebar (N-Panel) > Atlas",
     "category": "3D View",
-    "description": "Integrates the MLXAR platform's generative workflows directly into Blender's UI.",
+    "description": "Integrates the Atlas platform's generative workflows directly into Blender's UI.",
     "doc_url": "",  # Optional: Add a link to your documentation
 }
 
