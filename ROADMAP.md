@@ -33,7 +33,7 @@
 | **6** | Settings & Preferences | Medium |
 | **7** | UI Polish & Workflow Identity | Medium |
 | **8** | Testing & Documentation | Final |
-| **9** | Dedicated Atlas Workspace | Optional |
+| **9** | ~~External UI Exploration~~ | CANCELLED |
 
 ---
 
@@ -415,7 +415,7 @@ Phase 7 (UI Polish)
 Phase 8 (Testing)
          │
          ▼
-Phase 9 (Atlas Workspace) ──► Optional, can be done anytime after Phase 5
+Phase 9 (External UI) ──► CANCELLED (see rationale in Phase 9 section)
 ```
 
 ---
@@ -432,7 +432,7 @@ Phase 9 (Atlas Workspace) ──► Optional, can be done anytime after Phase 5
 | `atlas_workflow_state.py` | MODIFY - Add job history state |
 | `__init__.py` | MODIFY - Register new modules |
 | `preferences.py` | **NEW** - Addon settings |
-| `workspace_setup.py` | **NEW** - Atlas workspace creation (Phase 9) |
+| ~~`workspace_setup.py`~~ | CANCELLED - External UI exploration abandoned |
 
 ---
 
@@ -444,140 +444,38 @@ Phase 9 (Atlas Workspace) ──► Optional, can be done anytime after Phase 5
 | **0.3.0** | 3, 4, 5 | Complete Job History System |
 | **0.4.0** | 6, 7 | Settings + UI Polish |
 | **1.0.0** | 8 | Production Ready |
-| **1.1.0** | 9 | Dedicated Atlas Workspace (Optional) |
+| ~~**1.1.0**~~ | ~~9~~ | ~~External UI~~ (CANCELLED) |
 
 ---
 
-## Phase 9: Dedicated Atlas Workspace (Optional Enhancement)
+## ~~Phase 9: External UI Exploration~~ (CANCELLED)
 
-**Objective**: Create a dedicated Blender workspace tab ("Atlas") with a custom layout optimized for AI-assisted workflows.
+> **Status**: CANCELLED - After evaluation, external UI approaches were deemed unprofessional
+> for a production pipeline tool. The N-panel approach is the correct Blender-native solution.
 
-### Motivation
+### Decision Rationale
 
-The N-panel (sidebar) in the 3D viewport works, but it's cramped:
-- Limited width forces compact UI compromises
-- Competes for attention with modeling tools
-- Job history list/detail struggle for vertical space
-- No room for side-by-side input/output comparison
+We explored several external UI approaches:
 
-A dedicated workspace solves this:
-- Full-screen or split layout designed for Atlas workflows
-- Image Editor for viewing generated images
-- Text Editor for logs/job JSON inspection
-- Properties panel can show workflow inputs in full width
-- Professional, focused experience
+1. **Dedicated Blender Workspace** - Workable but added complexity without solving core UX issues
+2. **Tkinter Floating Window** - Required external Python deps, felt disconnected
+3. **Web UI (Flask + Browser)** - Clever hack but unprofessional for production tools
 
-### Technical Approach
+**Conclusion**: The N-panel IS the professional standard for Blender addons. The "cramped" feeling
+is a **design challenge to solve**, not a limitation to circumvent with external hacks.
 
-Blender workspaces are defined via Python using `bpy.data.workspaces` and can include:
-- Custom screen layouts with multiple areas (3D View, Image Editor, Properties, etc.)
-- Specific tool settings per area
-- Saved with the blend file OR can be added programmatically
+All major professional addons (Rigify, Hard Ops, BoxCutter, FLIP Fluids) use N-panels successfully.
+Users expect tools to be IN the DCC app. External UIs create context-switching friction and feel
+disconnected from the Blender workflow.
 
-**Two implementation options:**
+### Going Forward
 
-#### Option A: Bundled Startup File (Simple)
-- Ship a `.blend` file with the Atlas workspace pre-configured
-- User appends/links it once, workspace persists in their defaults
-- Pros: Full control, no Python complexity
-- Cons: Manual user setup step
-
-#### Option B: Programmatic Workspace Creation (Seamless)
-- On addon enable, create workspace via Python API
-- Duplicate an existing workspace, modify areas
-- Pros: Automatic, always available
-- Cons: More complex, area manipulation has quirks
-
-### Tasks
-
-#### 9.1 Design Workspace Layout
-- [ ] Define optimal area arrangement:
-  ```
-  ┌───────────────────────────────────────────────────────┐
-  │                   Top Bar (menus)                     │
-  ├──────────────┬────────────────────────┬───────────────┤
-  │              │                        │               │
-  │  Workflow    │                        │  Job Detail   │
-  │  Library     │     3D Viewport        │  Panel        │
-  │  & Inputs    │     (main working)     │  & History    │
-  │              │                        │               │
-  │              ├────────────────────────┤               │
-  │              │  Image Editor          │               │
-  │              │  (output preview)      │               │
-  │              │                        │               │
-  ├──────────────┴────────────────────────┴───────────────┤
-  │                    Timeline/Info                      │
-  └───────────────────────────────────────────────────────┘
-  ```
-- [ ] Determine which panels auto-open in each area
-
-#### 9.2 Implement Workspace Creation
-- [ ] Create `workspace_setup.py` module
-- [ ] Implement `ensure_atlas_workspace()` - creates if missing
-- [ ] Handle Blender version differences (API stable since 2.80)
-- [ ] Add operator `ATLAS_OT_OpenAtlasWorkspace` to switch to it
-
-#### 9.3 Area Configuration
-- [ ] Left sidebar: Workflow Library + Current Workflow panels
-- [ ] Right sidebar: Job History + Job Detail panels
-- [ ] Bottom: Image Editor with auto-load for output images
-- [ ] Optional: Text Editor area for job.json viewing
-
-#### 9.4 Integration
-- [ ] Button in N-panel: "Open Atlas Workspace" (switches tab)
-- [ ] Auto-switch to workspace when running first job (optional setting)
-- [ ] Load output images into Image Editor automatically
-- [ ] Workspace remembers state between sessions
-
-### Technical Notes
-
-**Creating a workspace programmatically:**
-```python
-import bpy
-
-def create_atlas_workspace():
-    # Duplicate existing workspace as base
-    if "Atlas" not in bpy.data.workspaces:
-        # Use ops to duplicate Layout workspace
-        bpy.ops.workspace.duplicate({'workspace': bpy.data.workspaces['Layout']})
-        ws = bpy.context.workspace
-        ws.name = "Atlas"
-        
-        # Now modify the screen areas
-        # This requires being in the right context
-        for area in ws.screens[0].areas:
-            if area.type == 'VIEW_3D':
-                # Configure 3D view settings
-                pass
-            elif area.type == 'IMAGE_EDITOR':
-                # Configure image editor
-                pass
-```
-
-**API Stability Note:** Workspace/Screen APIs have been stable since Blender 2.80 (2019). The same APIs work across 2.8x, 2.9x, 3.x, and 4.x. N-panel APIs are equally stable - both are core Blender functionality that rarely changes.
-
-### Test Criteria
-```
-✓ "Atlas" workspace created successfully on addon enable
-✓ Workspace appears in Blender's workspace tabs
-✓ All required areas present with correct types
-✓ Atlas panels visible in appropriate sidebars
-✓ Switching to workspace doesn't break anything
-✓ Output images auto-load in Image Editor
-✓ Workspace persists after Blender restart (in .blend)
-✓ Works across Blender 3.x and 4.x versions
-```
-
-### Benefits Summary
-
-| Aspect | N-Panel (Current) | Atlas Workspace |
-|--------|-------------------|-----------------|
-| Space | Cramped, ~300px wide | Full screen areas |
-| Job History | Scrolling list only | List + Detail side-by-side |
-| Image Output | Modal popup or external | Dedicated Image Editor |
-| Context Switching | Tab hidden while modeling | Dedicated workflow mode |
-| Professional Feel | Basic sidebar addon | Integrated Blender feature |
+Focus efforts on Phase 7 (UI Polish) instead:
+- Design for N-panel constraints (progressive disclosure, collapsible sections)
+- Use modal dialogs for complex detail views
+- Prioritize workflow efficiency over UI real estate
+- Study successful addons for design patterns
 
 ---
 
-*Last Updated: 2026-02-03*
+*Last Updated: 2026-02-05*

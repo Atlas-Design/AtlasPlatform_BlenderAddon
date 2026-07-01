@@ -130,7 +130,7 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
     Shows workflow library controls and loaded workflow info.
     """
     bl_idname = "ATLAS_PT_main_control_panel"
-    bl_label = "Workflow Library"
+    bl_label = "Atlas Workflow Library"
     bl_order = 0  # Ensures this panel is at the top
 
     @classmethod
@@ -142,83 +142,81 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
 
-        # --- Group Box 1: Load from File ---
-        box_file = layout.box()
-
-        box_file.operator("atlas.load_workflow", text="Load from File...", icon='FILE_FOLDER')
-        box_file.label(text="Workflow Library", icon='DOCUMENTS')
-        box_file.prop(state, "saved_workflows_enum", text="")
-
-        # --- Group Box 2: Loaded Workflow ---
-        box_loaded = layout.box()
-
-        if not state.active_api_id:
-            # Empty state for the "Loaded" panel
-            box_loaded.label(text="No workflow is loaded.", icon='INFO')
-        else:
-            # Display info and management buttons for the loaded workflow
-            header_row = box_loaded.row(align=True)
-            header_row.label(text="Loaded:", icon='FILE_TICK')
-            header_row.label(text=state.active_name)
-
-            # Management buttons only make sense if the loaded workflow is in the library
-            is_in_library = workflow_manager.is_workflow_in_library(state.active_workflow_filepath)
-            if state.is_active_workflow_savable:
-                box_loaded.operator("atlas.save_active_workflow", text="Save to Library", icon='ADD')
-
-            if is_in_library:
-                button_row = box_loaded.row(align=True)
-                button_row.operator("atlas.rename_workflow", text="Rename")
-                button_row.operator("atlas.delete_workflow", text="Delete")
-
-        # --- Final Global Actions ---
+        # --- Library Row: [Dropdown] [Import] [Delete] ---
         row = layout.row(align=True)
+        row.prop(state, "saved_workflows_enum", text="")
+        
+        # Import button - slightly wider than X button
+        import_btn = row.row(align=True)
+        import_btn.scale_x = 1.2
+        import_btn.operator("atlas.load_workflow", text="", icon='IMPORT')
+        
+        # Delete button (X icon) - only enabled if workflow is in library
+        is_in_library = workflow_manager.is_workflow_in_library(state.active_workflow_filepath)
+        delete_row = row.row(align=True)
+        delete_row.enabled = is_in_library and bool(state.active_api_id)
+        delete_row.operator("atlas.delete_workflow", text="", icon='X')
+
+        # --- Loaded Workflow Info ---
         if state.active_api_id:
-            row.operator("atlas.clear_cache", text="Clear Cache", icon='TRASH')
-        row.operator("atlas.open_preferences", text="", icon='PREFERENCES')
+            info_row = layout.row(align=True)
+            info_row.label(text="Loaded:", icon='CHECKMARK')
+            info_row.label(text=state.active_name)
+            
+            # Save to Library button (only if loaded from file, not already in library)
+            if state.is_active_workflow_savable:
+                layout.operator("atlas.save_active_workflow", text="Save to Library", icon='ADD')
 
 
-class ATLAS_PT_InputsPanel(ATLAS_PT_BasePanel):
+class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
     """
-    Displays all the input parameters for the currently loaded workflow.
+    Combined panel showing the selected workflow's inputs, outputs preview, and run button.
+    Only visible when a workflow is selected.
     """
-    bl_idname = "ATLAS_PT_inputs_panel"
-    bl_label = "Inputs"
+    bl_idname = "ATLAS_PT_selected_workflow_panel"
+    bl_label = "Selected Workflow"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "MLXAR"
     bl_order = 2  # Appears below running jobs panel
 
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        """Only visible when a workflow is actually selected."""
+        state = context.window_manager.atlas_workflow_state
+        return state and state.active_api_id
+
     def draw(self, context: bpy.types.Context):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
 
-        # Loop through each input parameter and draw its corresponding UI widget
-        for item in state.inputs:
-            draw_input_param(context, layout, item)
+        # --- INPUTS SECTION ---
+        if state.inputs:
+            inputs_box = layout.box()
+            inputs_box.label(text="Inputs", icon='IMPORT')
+            
+            for item in state.inputs:
+                draw_input_param(context, inputs_box, item)
+        
+        # --- OUTPUTS SECTION (Preview only - disabled) ---
+        if state.outputs:
+            outputs_box = layout.box()
+            outputs_box.label(text="Outputs", icon='EXPORT')
+            
+            # Draw outputs as disabled preview (just name + type icon)
+            col = outputs_box.column(align=True)
+            col.enabled = False  # Disable entire section
+            
+            for item in state.outputs:
+                row = col.row(align=True)
+                icon_id = custom_icons.get_icon_id(item.param_type)
+                row.label(text="", icon_value=icon_id)
+                row.label(text=item.label)
 
+        # --- RUN BUTTON ---
         layout.separator()
-        # The main "Run" button shows workflow name (workflow identity!)
-        # Always enabled - users can run multiple jobs concurrently
         run_text = f"Run {state.active_name}" if state.active_name else "Run Workflow"
         layout.operator("atlas.run_workflow", text=run_text, icon='PLAY')
-
-
-class ATLAS_PT_OutputsPanel(ATLAS_PT_BasePanel):
-    """
-    Displays the results from the last completed workflow run.
-    """
-    bl_idname = "ATLAS_PT_outputs_panel"
-    bl_label = "Outputs"
-    bl_order = 3  # Appears below inputs panel
-
-    def draw(self, context: bpy.types.Context):
-        layout = self.layout
-        state = context.window_manager.atlas_workflow_state
-
-        if not state.outputs:
-            layout.label(text="(No outputs defined in workflow)")
-        else:
-            # Loop through each output parameter and draw its UI
-            for item in state.outputs:
-                draw_output_param(context, layout, item)
 
 
 # -------------------------------------------------------------------
@@ -238,17 +236,21 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
             if item.status == 2:  # Completed
                 row.label(text="", icon='CHECKMARK')
             elif item.status == 3:  # Failed
-                row.label(text="", icon='CANCEL')
+                row.label(text="", icon='ERROR')
             elif item.status == 1:  # Running
                 row.label(text="", icon='TIME')
             else:
                 row.label(text="", icon='PAUSE')
             
-            # Workflow name
+            # Workflow name (takes remaining space)
             row.label(text=item.workflow_name)
             
-            # Time display
+            # Time display (compact)
             row.label(text=item.created_at_display)
+            
+            # View details button (small arrow icon)
+            op = row.operator("atlas.select_job", text="", icon='FORWARD', emboss=False)
+            op.job_index = index
             
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
@@ -299,8 +301,9 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
 
 class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
     """
-    Panel for browsing job history.
-    Shows filterable list of past jobs.
+    Two-state panel for browsing job history.
+    - List View: Shows filters + job list
+    - Detail View: Shows full details of selected job
     """
     bl_idname = "ATLAS_PT_job_history_panel"
     bl_label = "Jobs History"
@@ -323,11 +326,18 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         state = context.window_manager.atlas_workflow_state
         
         # Auto-load job history if empty (first time panel is opened)
-        # Use timer to avoid modifying data during draw
         if len(state.job_history) == 0 and not ATLAS_PT_JobHistoryPanel._auto_load_scheduled:
             ATLAS_PT_JobHistoryPanel._auto_load_scheduled = True
             bpy.app.timers.register(self._deferred_load_history, first_interval=0.1)
         
+        # Two-state panel: List View vs Detail View
+        if state.job_history_detail_mode and state.job_history_index >= 0:
+            self._draw_detail_view(context, layout, state)
+        else:
+            self._draw_list_view(context, layout, state)
+    
+    def _draw_list_view(self, context, layout, state):
+        """Draw the job history list with filters."""
         # Filter row 1: Status and Date
         filter_row1 = layout.row(align=True)
         filter_row1.prop(state, "filter_status", text="")
@@ -336,44 +346,54 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         # Filter row 2: Workflow dropdown
         layout.prop(state, "filter_workflow", text="")
         
-        # Job list
+        # Job list - each row has its own view button
         row = layout.row()
         row.template_list(
-            "ATLAS_UL_job_history_list",  # UIList class name
-            "",  # List ID (empty for default)
-            state,  # Data pointer
-            "job_history",  # Property name for collection
-            state,  # Active data pointer
-            "job_history_index",  # Property name for active index
-            rows=6,
-            maxrows=10,
+            "ATLAS_UL_job_history_list",
+            "",
+            state,
+            "job_history",
+            state,
+            "job_history_index",
+            rows=8,
+            maxrows=12,
         )
         
-        # Refresh button (small, at bottom)
+        # Just refresh button at bottom
         layout.operator("atlas.refresh_job_history", text="", icon='FILE_REFRESH')
-        
-        # Show selected job details
-        if state.job_history_index >= 0 and state.job_history_index < len(state.job_history):
-            selected_job = state.job_history[state.job_history_index]
-            self._draw_job_details(layout, selected_job)
     
-    def _draw_job_details(self, layout, selected_job):
-        """Draw detailed view of the selected job."""
+    def _draw_detail_view(self, context, layout, state):
+        """Draw the detailed view of a selected job."""
+        # Verify valid selection
+        if state.job_history_index < 0 or state.job_history_index >= len(state.job_history):
+            state.job_history_detail_mode = False
+            return
+        
+        selected_job = state.job_history[state.job_history_index]
+        
+        # Back button - prominent, full width with highlight
+        back_box = layout.box()
+        back_row = back_box.row()
+        back_row.scale_y = 1.3  # Taller button
+        back_row.operator("atlas.back_to_job_list", text="← Back to History", icon='LOOP_BACK')
+        
+        layout.separator()
+        
         # Load full job data
         full_job = job_manager.get_job(selected_job.job_folder_path)
         if not full_job:
             layout.label(text="Could not load job details", icon='ERROR')
             return
         
-        box = layout.box()
-        
         # === HEADER ===
-        header_row = box.row()
+        header_box = layout.box()
+        header_row = header_box.row()
+        
         if selected_job.status == 2:  # Completed
             header_row.label(text="", icon='CHECKMARK')
-            status_text = "Succeeded"
+            status_text = "Completed"
         elif selected_job.status == 3:  # Failed
-            header_row.label(text="", icon='CANCEL')
+            header_row.label(text="", icon='ERROR')
             status_text = "Failed"
         else:
             header_row.label(text="", icon='TIME')
@@ -383,62 +403,47 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         header_col.label(text=selected_job.workflow_name)
         header_col.label(text=f"{selected_job.created_at_display} • {status_text}")
         
-        box.separator()
-        
         # === ERROR INFO (if failed) ===
         if full_job.Status == 3 and full_job.ErrorMessage:
-            error_box = box.box()
+            error_box = layout.box()
             error_box.alert = True
             error_box.label(text="Error:", icon='ERROR')
             
             # Wrap long error messages
             error_msg = full_job.ErrorMessage
-            if len(error_msg) > 50:
-                words = error_msg.split()
-                lines = []
-                current_line = ""
-                for word in words:
-                    if len(current_line) + len(word) < 45:
-                        current_line += (" " if current_line else "") + word
-                    else:
-                        lines.append(current_line)
-                        current_line = word
-                if current_line:
-                    lines.append(current_line)
-                for line in lines[:3]:  # Max 3 lines
-                    error_box.label(text=line)
-            else:
-                error_box.label(text=error_msg)
+            lines = self._wrap_text(error_msg, 40)
+            for line in lines[:4]:  # Max 4 lines
+                error_box.label(text=line)
             
             if full_job.ErrorNodeName:
                 error_box.label(text=f"Node: {full_job.ErrorNodeName}")
         
-        # === INPUTS ===
+        # === INPUTS SECTION (disabled/read-only) ===
         if full_job.InputsSnapshot:
-            inputs_box = box.box()
-            inputs_header = inputs_box.row()
-            inputs_header.label(text="Inputs", icon='IMPORT')
+            inputs_box = layout.box()
+            inputs_box.label(text="Inputs", icon='IMPORT')
+            
+            inputs_col = inputs_box.column(align=True)
+            inputs_col.enabled = False  # Disable entire section
             
             for inp in full_job.InputsSnapshot:
-                self._draw_param_snapshot(inputs_box, inp, is_input=True)
+                self._draw_input_param(inputs_col, inp)
         
-        # === OUTPUTS ===
+        # === OUTPUTS SECTION (with actions) ===
         if full_job.OutputsSnapshot:
-            outputs_box = box.box()
-            outputs_header = outputs_box.row()
-            outputs_header.label(text="Outputs", icon='EXPORT')
+            outputs_box = layout.box()
+            outputs_box.label(text="Outputs", icon='EXPORT')
             
             for out in full_job.OutputsSnapshot:
-                self._draw_param_snapshot(outputs_box, out, is_input=False, job_folder=full_job.JobFolderPath)
+                self._draw_output_param(outputs_box, out, full_job.JobFolderPath)
         
         # === ACTION BUTTONS ===
-        box.separator()
-        actions_row = box.row(align=True)
-        op = actions_row.operator("atlas.open_job_folder", text="Open Folder", icon='FILE_FOLDER')
+        layout.separator()
+        op = layout.operator("atlas.open_job_folder", text="Open Folder", icon='FILE_FOLDER')
         op.job_folder_path = selected_job.job_folder_path
     
-    def _draw_param_snapshot(self, layout, param, is_input=True, job_folder=None):
-        """Draw a single parameter from input/output snapshot."""
+    def _draw_input_param(self, layout, param):
+        """Draw a single input parameter (disabled/read-only)."""
         row = layout.row(align=True)
         
         param_type = param.get('ParamType', 'string')
@@ -448,40 +453,115 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         # Type icon
         icon_id = custom_icons.get_icon_id(param_type)
         row.label(text="", icon_value=icon_id)
-        
-        # Label
         row.label(text=label)
         
-        # Value based on type
+        # Value display (all disabled since this is historical data)
         if param_type == 'boolean':
-            value = "✓" if param.get('BoolValue', False) else "✗"
+            value = "✓ Yes" if param.get('BoolValue', False) else "✗ No"
             row.label(text=value)
         elif param_type == 'number':
             value = param.get('NumberValue', 0.0)
-            row.label(text=f"{value:.2f}" if isinstance(value, float) else str(value))
+            row.label(text=f"{value:.3f}" if isinstance(value, float) else str(value))
         elif param_type == 'string':
             value = param.get('StringValue', '')
-            # Truncate long strings
-            if value and len(value) > 30:
-                value = value[:27] + "..."
+            if value and len(value) > 25:
+                value = value[:22] + "..."
             row.label(text=value or "(empty)")
         elif param_type in ('image', 'mesh'):
             file_path = param.get('FilePath', '')
             if file_path:
-                import os
+                filename = os.path.basename(file_path)
+                row.label(text=filename)
+            else:
+                row.label(text="(no file)")
+    
+    def _draw_output_param(self, layout, param, job_folder):
+        """Draw a single output parameter with appropriate actions."""
+        param_type = param.get('ParamType', 'string')
+        param_id = param.get('ParamId', 'unknown')
+        label = param.get('Label', param_id)
+        
+        row = layout.row(align=True)
+        
+        # Type icon
+        icon_id = custom_icons.get_icon_id(param_type)
+        row.label(text="", icon_value=icon_id)
+        row.label(text=label)
+        
+        # Value display + actions based on type
+        if param_type == 'boolean':
+            # Bool: Just display value (no action makes sense)
+            value = "✓ Yes" if param.get('BoolValue', False) else "✗ No"
+            row.label(text=value)
+            
+        elif param_type == 'number':
+            # Number: Display + copy button
+            value = param.get('NumberValue', 0.0)
+            value_str = f"{value:.4f}" if isinstance(value, float) else str(value)
+            row.label(text=value_str)
+            op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
+            op.value = value_str
+            
+        elif param_type == 'string':
+            # String: Display + copy button
+            value = param.get('StringValue', '')
+            display = value[:20] + "..." if len(value) > 20 else value
+            row.label(text=display or "(empty)")
+            if value:
+                op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
+                op.value = value
+                
+        elif param_type == 'image':
+            # Image: filename + View/Apply buttons
+            file_path = param.get('FilePath', '')
+            if file_path and os.path.exists(file_path):
                 filename = os.path.basename(file_path)
                 row.label(text=filename)
                 
-                # Add view/import button for outputs
-                if not is_input and job_folder and os.path.exists(file_path):
-                    if param_type == 'image':
-                        op = row.operator("atlas.view_job_output_image", text="", icon='IMAGE_DATA')
-                        op.file_path = file_path
-                    elif param_type == 'mesh':
-                        op = row.operator("atlas.import_job_output_mesh", text="", icon='IMPORT')
-                        op.file_path = file_path
+                # Action buttons on new row for more space
+                actions_row = layout.row(align=True)
+                actions_row.separator()  # Indent
+                
+                op_view = actions_row.operator("atlas.view_job_output_image", text="View", icon='IMAGE_DATA')
+                op_view.file_path = file_path
+                
+                # Apply as texture (reuse existing operator concept)
+                op_apply = actions_row.operator("atlas.view_job_output_image", text="Apply", icon='TEXTURE')
+                op_apply.file_path = file_path
             else:
-                row.label(text="(no file)")
+                row.label(text="(file not found)")
+                
+        elif param_type == 'mesh':
+            # Mesh: filename + Import button
+            file_path = param.get('FilePath', '')
+            if file_path and os.path.exists(file_path):
+                filename = os.path.basename(file_path)
+                row.label(text=filename)
+                
+                # Action buttons on new row
+                actions_row = layout.row(align=True)
+                actions_row.separator()  # Indent
+                
+                op_import = actions_row.operator("atlas.import_job_output_mesh", text="Import", icon='IMPORT')
+                op_import.file_path = file_path
+            else:
+                row.label(text="(file not found)")
+    
+    def _wrap_text(self, text, max_chars):
+        """Wrap text into lines of max_chars length."""
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            if len(current_line) + len(word) + 1 <= max_chars:
+                current_line += (" " if current_line else "") + word
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        return lines
     
     @staticmethod
     def _deferred_load_history():
@@ -626,8 +706,7 @@ classes = (
     ATLAS_UL_JobHistoryList,  # UIList must be registered first
     ATLAS_PT_MainControlPanel,
     ATLAS_PT_RunningJobsPanel,
-    ATLAS_PT_InputsPanel,
-    ATLAS_PT_OutputsPanel,
+    ATLAS_PT_SelectedWorkflowPanel,
     ATLAS_PT_JobHistoryPanel,
 )
 

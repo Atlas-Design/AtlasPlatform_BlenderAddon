@@ -276,6 +276,13 @@ class AtlasWorkflowState(PropertyGroup):
         update=_on_filter_changed
     )
     
+    # Job history detail view mode (for two-state panel)
+    job_history_detail_mode: BoolProperty(
+        name="Detail Mode",
+        description="True when viewing job details, False when viewing list",
+        default=False
+    )
+    
     # Legacy single-job properties (kept for backwards compatibility during transition)
     job_running: BoolProperty(
         default=False,
@@ -314,7 +321,7 @@ class AtlasWorkflowState(PropertyGroup):
         """Called when the user selects a workflow from the dropdown."""
         workflow_id = self.saved_workflows_enum
 
-        if not workflow_id or workflow_id == '__PLACEHOLDER__':
+        if not workflow_id or workflow_id == '__NONE__':
             return
 
         library_dir = workflow_manager.get_library_dir()
@@ -332,7 +339,7 @@ class AtlasWorkflowState(PropertyGroup):
             except Exception as e:
                 self.report({'INFO'}, f"[MLXAR] Failed to load workflow '{workflow_id}': {e}")
 
-        bpy.app.timers.call_soon(lambda: setattr(self, 'saved_workflows_enum', '__PLACEHOLDER__'))
+        bpy.app.timers.call_soon(lambda: setattr(self, 'saved_workflows_enum', '__NONE__'))
 
     saved_workflows_enum: EnumProperty(
         name="Saved Workflows",

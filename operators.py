@@ -391,6 +391,52 @@ class ATLAS_OT_OpenPreferences(Operator):
         return {'FINISHED'}
 
 
+class ATLAS_OT_CopyToClipboard(Operator):
+    """Copy value to clipboard"""
+    bl_idname = "atlas.copy_to_clipboard"
+    bl_label = "Copy to Clipboard"
+    bl_options = {'REGISTER'}
+    
+    value: StringProperty(
+        description="Value to copy"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        context.window_manager.clipboard = self.value
+        self.report({'INFO'}, f"Copied: {self.value[:50]}{'...' if len(self.value) > 50 else ''}")
+        return {'FINISHED'}
+
+
+class ATLAS_OT_SelectJob(Operator):
+    """View job details"""
+    bl_idname = "atlas.select_job"
+    bl_label = "View Job Details"
+    bl_options = {'REGISTER'}
+    
+    job_index: bpy.props.IntProperty(
+        description="Index of the job to select"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        state = context.window_manager.atlas_workflow_state
+        if 0 <= self.job_index < len(state.job_history):
+            state.job_history_index = self.job_index
+            state.job_history_detail_mode = True
+        return {'FINISHED'}
+
+
+class ATLAS_OT_BackToJobList(Operator):
+    """Return to job history list"""
+    bl_idname = "atlas.back_to_job_list"
+    bl_label = "Back to List"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        state = context.window_manager.atlas_workflow_state
+        state.job_history_detail_mode = False
+        return {'FINISHED'}
+
+
 class ATLAS_OT_PickInputFile(Operator, ImportHelper):
     """Select a file with specific format filtering"""
     bl_idname = "mlxar.pick_input_file"  # Using the new branding
@@ -1185,6 +1231,9 @@ classes = (
     ATLAS_OT_ViewJobOutputImage,
     ATLAS_OT_ImportJobOutputMesh,
     ATLAS_OT_OpenPreferences,
+    ATLAS_OT_CopyToClipboard,
+    ATLAS_OT_SelectJob,
+    ATLAS_OT_BackToJobList,
 )
 
 

@@ -160,4 +160,6 @@ def get_saved_workflows_for_enum(self, context: bpy.types.Context) -> list:
         _saved_workflows = []
 
     # Add a placeholder at the beginning
-    return [('__PLACEHOLDER__', "Load from Library", "Select a saved workflow")] + _saved_workflows
+    # Always include empty option at the top (selected by default)
+    empty_option = [('__NONE__', "", "No workflow selected")]
+    return empty_option + _saved_workflows

@@ -190,6 +190,10 @@ class AtlasAddonPreferences(AddonPreferences):
         row.operator("atlas.cleanup_old_jobs", text="Clean Old Jobs", icon='TRASH')
         row.operator("atlas.clear_all_jobs", text="Clear All", icon='X')
         
+        # Temp cache cleanup
+        col.separator()
+        col.operator("atlas.clear_cache", text="Clear Temp Cache", icon='FILE_REFRESH')
+        
         # --- Notification Settings ---
         box = layout.box()
         box.label(text="Notifications", icon='INFO')
