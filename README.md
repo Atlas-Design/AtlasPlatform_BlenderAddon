@@ -1,5 +1,5 @@
 ﻿<p align="center">
-  <img src="images/Banner.png" alt="Atlas Workflow Banner" width="100%"/>
+  <img src="images/Banner.png" alt="Atlas Workflow Banner" width="900"/>
 </p>
 
 <h1 align="center">Atlas Workflow for Blender</h1>
@@ -64,19 +64,19 @@ This is the main panel for one workflow at a time: pick what to run, fill in inp
 | **Run button** | Starts the selected workflow with the current inputs. The button label includes the workflow name. |
 
 <p align="center">
-  <img src="images/Blender_Atlas_Tab.png" alt="Blender sidebar with the Atlas tab selected" width="85%"/>
+  <img src="images/Blender_Atlas_Tab.png" alt="Blender sidebar with the Atlas tab selected" width="900"/>
   <br/>
   <em>Atlas tab in Blender's 3D View sidebar.</em>
 </p>
 
 <p align="center">
-  <img src="images/Workflow_Loaded.png" alt="Atlas Workflow Library and compact selected workflow panel" width="85%"/>
+  <img src="images/Workflow_Loaded.png" alt="Atlas Workflow Library and compact selected workflow panel" width="445"/>
   <br/>
   <em>Workflow loaded and ready to run.</em>
 </p>
 
 <p align="center">
-  <img src="images/Workflow_Inputs.png" alt="Workflow inputs for image, mesh, number, boolean, and text" width="85%"/>
+  <img src="images/Workflow_Inputs.png" alt="Workflow inputs for image, mesh, number, boolean, and text" width="418"/>
   <br/>
   <em>Type-aware input controls for files, scene data, and primitive values.</em>
 </p>
@@ -91,7 +91,7 @@ This is the main panel for one workflow at a time: pick what to run, fill in inp
 6. Review the completed run in **Jobs History**.
 
 <p align="center">
-  <img src="images/Workflow_Running.png" alt="Running job progress in the Atlas sidebar" width="85%"/>
+  <img src="images/Workflow_Running.png" alt="Running job progress in the Atlas sidebar" width="453"/>
   <br/>
   <em>Running Jobs shows current execution status and progress.</em>
 </p>
@@ -112,13 +112,13 @@ Jobs History is where you review current and past workflow runs. The history pan
 | **Open Folder** | Opens the local job folder containing `job.json`, inputs, and downloaded outputs. |
 
 <p align="center">
-  <img src="images/Job_History_List.png" alt="Jobs History list in the Atlas Blender addon" width="85%"/>
+  <img src="images/Job_History_List.png" alt="Jobs History list in the Atlas Blender addon" width="633"/>
   <br/>
   <em>History list for completed, failed, and running jobs.</em>
 </p>
 
 <p align="center">
-  <img src="images/Job_History_Detail.png" alt="Completed job detail with outputs first" width="85%"/>
+  <img src="images/Job_History_Detail.png" alt="Completed job detail with outputs first" width="397"/>
   <br/>
   <em>Job detail prioritizes outputs, with inputs collapsed by default.</em>
 </p>
@@ -132,19 +132,19 @@ Jobs History is where you review current and past workflow runs. The history pan
 - **Copy** actions copy text or primitive values to the clipboard.
 
 <p align="center">
-  <img src="images/Image_Output_Actions.png" alt="Image output actions and preview plane in Blender" width="85%"/>
+  <img src="images/Image_Output_Actions.png" alt="Image output actions and preview plane in Blender" width="409"/>
   <br/>
   <em>Image outputs can be previewed as planes or applied as materials.</em>
 </p>
 
 <p align="center">
-  <img src="images/Mesh_Output_Imported.png" alt="Generated mesh imported into Blender" width="85%"/>
+  <img src="images/Mesh_Output_Imported.png" alt="Generated mesh imported into Blender" width="484"/>
   <br/>
   <em>Generated mesh imported into the Blender scene.</em>
 </p>
 
 <p align="center">
-  <img src="images/Text_Output_Dialog.png" alt="Full generated text output dialog" width="85%"/>
+  <img src="images/Text_Output_Dialog.png" alt="Full generated text output dialog" width="700"/>
   <br/>
   <em>Full text outputs open in a compact dialog with copy support.</em>
 </p>
@@ -196,7 +196,7 @@ Open **Edit > Preferences > Add-ons > Atlas Workflow Integration** and set:
 API v0.2+ workflow runs fail immediately if no key is configured.
 
 <p align="center">
-  <img src="images/Addon_Preferences.png" alt="Atlas Workflow Integration addon preferences in Blender" width="85%"/>
+  <img src="images/Addon_Preferences.png" alt="Atlas Workflow Integration addon preferences in Blender" width="900"/>
   <br/>
   <em>Addon preferences for API key, timeout, polling, output behavior, and storage.</em>
 </p>
@@ -212,7 +212,7 @@ Open a 3D View, press `N`, and choose the **Atlas** tab.
 3. The workflow appears in the library and the **Selected Workflow** panel.
 
 <p align="center">
-  <img src="images/Workflow_Import_FilePicker.png" alt="Selecting a workflow JSON file for import" width="75%"/>
+  <img src="images/Workflow_Import_FilePicker.png" alt="Selecting a workflow JSON file for import" width="419"/>
   <br/>
   <em>Import a workflow JSON exported from Atlas Platform.</em>
 </p>
