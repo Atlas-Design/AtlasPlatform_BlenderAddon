@@ -12,6 +12,11 @@ import os
 import logging
 log = logging.getLogger("atlas_workflow")
 
+
+def get_addon_root_dir() -> str:
+    """Return the installable addon package root directory."""
+    return os.path.dirname(os.path.dirname(__file__))
+
 # This global dictionary will hold our icon collection.
 preview_collections = {}
 
@@ -48,7 +53,7 @@ def register():
     pcoll = bpy.utils.previews.new()
 
     # The path to our /icons folder, calculated relative to this file
-    icon_dir = os.path.join(os.path.dirname(__file__), "icons")
+    icon_dir = os.path.join(get_addon_root_dir(), "icons")
 
     # This dictionary maps a unique ID (our param_type) to a filename.
     # To add a new icon, just add a line here and place the file in /icons.

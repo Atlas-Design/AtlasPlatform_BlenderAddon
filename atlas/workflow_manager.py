@@ -14,6 +14,11 @@ import shutil
 import logging
 log = logging.getLogger("atlas_workflow")
 
+
+def get_addon_root_dir() -> str:
+    """Return the installable addon package root directory."""
+    return os.path.dirname(os.path.dirname(__file__))
+
 # --- Directory Management ---
 
 def get_library_dir() -> str:
@@ -26,8 +31,8 @@ def get_library_dir() -> str:
     Returns:
         The absolute path to the library directory.
     """
-    # Get the directory of the currently running addon
-    addon_dir = os.path.dirname(__file__)
+    # Store the user library at the addon root, not inside the implementation package.
+    addon_dir = get_addon_root_dir()
     library_dir = os.path.join(addon_dir, "atlas_workflows")
 
     # Create the directory if it doesn't exist

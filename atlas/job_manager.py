@@ -33,6 +33,11 @@ from pathlib import Path
 log = logging.getLogger("atlas_workflow")
 
 
+def get_addon_root_dir() -> str:
+    """Return the installable addon package root directory."""
+    return os.path.dirname(os.path.dirname(__file__))
+
+
 # ---------------------------------------------------------------------------
 # Enums matching Unity's job status values
 # ---------------------------------------------------------------------------
@@ -144,7 +149,7 @@ def get_jobs_root_dir() -> str:
     Returns:
         Path like: {addon_dir}/atlas_jobs/
     """
-    addon_dir = os.path.dirname(__file__)
+    addon_dir = get_addon_root_dir()
     jobs_dir = os.path.join(addon_dir, "atlas_jobs")
     
     if not os.path.exists(jobs_dir):

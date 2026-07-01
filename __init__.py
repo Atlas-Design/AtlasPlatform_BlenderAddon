@@ -26,11 +26,11 @@ bl_info = {
 # Instead of importing every class, we import the registration functions
 # from each module. This keeps the __init__.py file clean.
 
-from . import preferences
-from . import atlas_workflow_state
-from . import custom_icons
-from . import operators
-from . import ui_panel
+from .atlas import preferences
+from .atlas import atlas_workflow_state
+from .atlas import custom_icons
+from .atlas import operators
+from .atlas import ui_panel
 
 import logging
 log = logging.getLogger("atlas_workflow")

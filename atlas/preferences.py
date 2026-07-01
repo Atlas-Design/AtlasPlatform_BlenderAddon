@@ -28,6 +28,7 @@ import logging
 from . import job_manager
 
 log = logging.getLogger("atlas_workflow")
+ADDON_PACKAGE = __package__.split(".")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ class AtlasAddonPreferences(AddonPreferences):
     Access via: bpy.context.preferences.addons['Platform_BlenderAddon'].preferences
     Or use get_preferences() helper function.
     """
-    bl_idname = __package__  # Must match the addon folder name
+    bl_idname = ADDON_PACKAGE  # Must match the addon folder name
 
     # --- API Settings ---
     workspace_api_key: StringProperty(
@@ -362,7 +363,7 @@ def get_preferences(context=None) -> AtlasAddonPreferences:
         context = bpy.context
     
     try:
-        return context.preferences.addons[__package__].preferences
+        return context.preferences.addons[ADDON_PACKAGE].preferences
     except (KeyError, AttributeError):
         return None
 
