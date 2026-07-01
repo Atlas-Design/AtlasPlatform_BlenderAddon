@@ -16,7 +16,7 @@ All functions are designed to be called from a background thread.
 
 import os
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -110,7 +110,13 @@ class AtlasAPIClient:
             client.download_file(api_id, result.outputs["output_mesh"], "/path/to/output.glb")
     """
 
-    def __init__(self, base_url: str, version: str = "0.1", timeout: Optional[int] = 300):
+    def __init__(
+        self,
+        base_url: str,
+        version: str = "0.1",
+        timeout: Optional[int] = 300,
+        api_key: Optional[str] = None,
+    ):
         """
         Initialize the API client.
         
@@ -118,6 +124,7 @@ class AtlasAPIClient:
             base_url: The API base URL (e.g., "https://api.prod.atlas.design")
             version: API version string (e.g., "0.1")
             timeout: Request timeout in seconds. Set to 0 or None for no timeout.
+            api_key: Workspace API key required by platform API v0.2 and newer.
         """
         if requests is None:
             raise RuntimeError("The 'requests' library is not installed. Please install it to use the Atlas API.")
@@ -130,10 +137,46 @@ class AtlasAPIClient:
         self.version = version
         # Handle timeout: 0 or None means no timeout
         self.timeout = timeout if timeout and timeout > 0 else None
+        self.api_key = api_key.strip() if api_key else ""
+        self.uses_v2_routes = self._version_at_least(0, 2)
+
+        if self.uses_v2_routes and not self.api_key:
+            raise RuntimeError(
+                "Atlas API v0.2+ requires a workspace API key. "
+                "Set it in the addon preferences or the API_KEY environment variable."
+            )
 
     def _build_url(self, *parts: str) -> str:
         """Build a full URL from path parts"""
         return f"{self.base_url}/{self.version}/{'/'.join(parts)}"
+
+    def _version_at_least(self, major: int, minor: int) -> bool:
+        """Return True when the workflow API version is at least major.minor."""
+        raw_parts = str(self.version).lstrip("v").split(".")
+        parsed_parts = []
+        for part in raw_parts[:2]:
+            digits = "".join(ch for ch in part if ch.isdigit())
+            parsed_parts.append(int(digits) if digits else 0)
+
+        while len(parsed_parts) < 2:
+            parsed_parts.append(0)
+
+        return tuple(parsed_parts[:2]) >= (major, minor)
+
+    def _headers(self) -> Optional[Dict[str, str]]:
+        """Build auth headers for API versions that require workspace auth."""
+        if not self.api_key:
+            return None
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _raise_for_status(self, response, action: str) -> None:
+        """Raise friendly auth errors while preserving requests exceptions."""
+        if response.status_code in (401, 403):
+            raise requests.HTTPError(
+                f"{action} failed ({response.status_code}): invalid or missing workspace API key.",
+                response=response,
+            )
+        response.raise_for_status()
 
     # ---------------------------------------------------------------------------
     # API Methods
@@ -157,16 +200,16 @@ class AtlasAPIClient:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        url = self._build_url("upload", api_id)
+        url = self._build_url("upload") if self.uses_v2_routes else self._build_url("upload", api_id)
         file_name = os.path.basename(file_path)
 
         log.debug(f"[Atlas API] Uploading {file_name} to {url}")
 
         with open(file_path, "rb") as f:
             files = {"file": (file_name, f)}
-            response = requests.post(url, files=files, timeout=self.timeout)
+            response = requests.post(url, headers=self._headers(), files=files, timeout=self.timeout)
 
-        response.raise_for_status()
+        self._raise_for_status(response, "File upload")
         result = response.json()
         file_id = result.get("file_id")
 
@@ -192,9 +235,11 @@ class AtlasAPIClient:
         log.debug(f"[Atlas API] Executing workflow {api_id}")
         log.debug(f"[Atlas API] Payload: {payload}")
 
-        response = requests.post(url, json=payload, timeout=self.timeout)
+        response = requests.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
 
         if not response.ok:
+            if response.status_code in (401, 403):
+                self._raise_for_status(response, "API submission")
             error_text = response.text
             log.error(f"[Atlas API] Execution failed ({response.status_code}): {error_text}")
             raise requests.HTTPError(
@@ -225,8 +270,8 @@ class AtlasAPIClient:
 
         log.debug(f"[Atlas API] Polling status for {execution_id}")
 
-        response = requests.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        response = requests.get(url, headers=self._headers(), timeout=self.timeout)
+        self._raise_for_status(response, "Status polling")
 
         data = response.json()
         status_str = data.get("status", "").lower()
@@ -287,12 +332,16 @@ class AtlasAPIClient:
         Raises:
             requests.HTTPError: If download fails
         """
-        url = self._build_url("download_binary_result", api_id, file_id)
+        url = (
+            self._build_url("download_binary_result", file_id)
+            if self.uses_v2_routes
+            else self._build_url("download_binary_result", api_id, file_id)
+        )
 
         log.debug(f"[Atlas API] Downloading {file_id} to {output_path}")
 
-        response = requests.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        response = requests.get(url, headers=self._headers(), timeout=self.timeout)
+        self._raise_for_status(response, "File download")
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -308,9 +357,14 @@ class AtlasAPIClient:
 # Convenience function for quick client creation
 # ---------------------------------------------------------------------------
 
-def create_client(base_url: str, version: str = "0.1", timeout: int = 300) -> AtlasAPIClient:
+def create_client(
+    base_url: str,
+    version: str = "0.1",
+    timeout: int = 300,
+    api_key: Optional[str] = None,
+) -> AtlasAPIClient:
     """Create an AtlasAPIClient instance"""
-    return AtlasAPIClient(base_url=base_url, version=version, timeout=timeout)
+    return AtlasAPIClient(base_url=base_url, version=version, timeout=timeout, api_key=api_key)
 
 
 # ---------------------------------------------------------------------------

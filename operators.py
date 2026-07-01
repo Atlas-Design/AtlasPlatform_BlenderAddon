@@ -307,11 +307,51 @@ class ATLAS_OT_OpenJobFolder(Operator):
         return {'FINISHED'}
 
 
+def _load_image_from_path(file_path: str):
+    """Load an image file into Blender, reusing an existing datablock when possible."""
+    return bpy.data.images.load(file_path, check_existing=True)
+
+
+def _create_image_material(image_datablock, name_prefix: str = "Atlas Image"):
+    """Create a new node material that displays the given image."""
+    material_name = f"{name_prefix}: {image_datablock.name}"
+    material = bpy.data.materials.new(material_name)
+    material.use_nodes = True
+    material.blend_method = 'BLEND'
+
+    nodes = material.node_tree.nodes
+    bsdf_node = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if not bsdf_node:
+        bsdf_node = nodes.new('ShaderNodeBsdfPrincipled')
+
+    tex_node = nodes.new('ShaderNodeTexImage')
+    tex_node.image = image_datablock
+    tex_node.location = (bsdf_node.location.x - 400, bsdf_node.location.y)
+    material.node_tree.links.new(tex_node.outputs['Color'], bsdf_node.inputs['Base Color'])
+    if 'Alpha' in tex_node.outputs and 'Alpha' in bsdf_node.inputs:
+        material.node_tree.links.new(tex_node.outputs['Alpha'], bsdf_node.inputs['Alpha'])
+
+    return material
+
+
+def _set_viewports_to_material_preview(context: bpy.types.Context) -> None:
+    """Switch wireframe/solid 3D viewports to Material Preview so image textures are visible."""
+    if not context.screen:
+        return
+
+    for area in context.screen.areas:
+        if area.type != 'VIEW_3D':
+            continue
+        for space in area.spaces:
+            if space.type == 'VIEW_3D' and space.shading.type in {'WIREFRAME', 'SOLID'}:
+                space.shading.type = 'MATERIAL'
+
+
 class ATLAS_OT_ViewJobOutputImage(Operator):
-    """Load and view an image from job output"""
+    """Create a textured preview plane from a job output image."""
     bl_idname = "atlas.view_job_output_image"
     bl_label = "View Image"
-    bl_options = {'REGISTER'}
+    bl_options = {'REGISTER', 'UNDO'}
     
     file_path: StringProperty(
         description="Path to the image file"
@@ -323,23 +363,61 @@ class ATLAS_OT_ViewJobOutputImage(Operator):
             return {'CANCELLED'}
         
         try:
-            # Load the image into Blender
-            img = bpy.data.images.load(self.file_path, check_existing=True)
-            
-            # Open in image editor if possible
-            for area in context.screen.areas:
-                if area.type == 'IMAGE_EDITOR':
-                    area.spaces.active.image = img
-                    self.report({'INFO'}, f"Loaded image: {img.name}")
-                    return {'FINISHED'}
-            
-            # No image editor found, just report success
-            self.report({'INFO'}, f"Loaded image: {img.name} (open Image Editor to view)")
-            
+            img = _load_image_from_path(self.file_path)
+            width, height = img.size
+            aspect = (width / height) if width > 0 and height > 0 else 1.0
+
+            plane_height = 2.0
+            plane_width = plane_height * aspect
+            bpy.ops.mesh.primitive_plane_add(size=1, location=context.scene.cursor.location)
+            plane = context.object
+            plane.name = f"Atlas Image Preview: {os.path.splitext(os.path.basename(self.file_path))[0]}"
+            plane.dimensions = (plane_width, plane_height, 0.0)
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+            material = _create_image_material(img, "Atlas Preview")
+            plane.data.materials.append(material)
+
+            _set_viewports_to_material_preview(context)
+            self.report({'INFO'}, f"Created image preview plane: {img.name}")
         except Exception as e:
-            self.report({'ERROR'}, f"Failed to load image: {e}")
+            self.report({'ERROR'}, f"Failed to create image preview: {e}")
             return {'CANCELLED'}
         
+        return {'FINISHED'}
+
+
+class ATLAS_OT_ApplyJobOutputImage(Operator):
+    """Apply a job output image as a new material on the selected object."""
+    bl_idname = "atlas.apply_job_output_image"
+    bl_label = "Apply Image"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    file_path: StringProperty(
+        description="Path to the image file"
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if not self.file_path or not os.path.exists(self.file_path):
+            self.report({'ERROR'}, "Image file not found")
+            return {'CANCELLED'}
+
+        active_obj = context.active_object
+        if not active_obj or not hasattr(active_obj.data, "materials"):
+            self.report({'ERROR'}, "Select an object before applying this image.")
+            return {'CANCELLED'}
+
+        try:
+            img = _load_image_from_path(self.file_path)
+            material = _create_image_material(img, "Atlas Output")
+            active_obj.data.materials.append(material)
+            active_obj.active_material_index = len(active_obj.data.materials) - 1
+            _set_viewports_to_material_preview(context)
+            self.report({'INFO'}, f"Applied '{img.name}' to '{active_obj.name}'.")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to apply image: {e}")
+            return {'CANCELLED'}
+
         return {'FINISHED'}
 
 
@@ -492,10 +570,10 @@ class ATLAS_OT_ApplyOutputImage(Operator):
     )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        """Finds the active material and adds the image as a texture."""
+        """Creates a new image material and assigns it to the active object."""
         active_obj = context.active_object
-        if not active_obj:
-            self.report({'ERROR'}, "No active object selected.")
+        if not active_obj or not hasattr(active_obj.data, "materials"):
+            self.report({'ERROR'}, "Select an object before applying this image.")
             return {'CANCELLED'}
 
         if not self.image_name:
@@ -507,24 +585,12 @@ class ATLAS_OT_ApplyOutputImage(Operator):
             self.report({'ERROR'}, f"Image '{self.image_name}' not found.")
             return {'CANCELLED'}
 
-        material = active_obj.active_material
-        if not material or not material.use_nodes:
-            self.report({'ERROR'}, "Active object has no material or it does not use nodes.")
-            return {'CANCELLED'}
+        material = _create_image_material(image_datablock, "Atlas Output")
+        active_obj.data.materials.append(material)
+        active_obj.active_material_index = len(active_obj.data.materials) - 1
+        _set_viewports_to_material_preview(context)
 
-        # Find the Principled BSDF node to connect to
-        bsdf_node = next((n for n in material.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
-        if not bsdf_node:
-            self.report({'ERROR'}, "No Principled BSDF node found in the material.")
-            return {'CANCELLED'}
-
-        # Create a new image texture node and link it
-        tex_node = material.node_tree.nodes.new('ShaderNodeTexImage')
-        tex_node.image = image_datablock
-        tex_node.location = (bsdf_node.location.x - 400, bsdf_node.location.y)
-        material.node_tree.links.new(tex_node.outputs['Color'], bsdf_node.inputs['Base Color'])
-
-        self.report({'INFO'}, f"Applied '{self.image_name}' to material '{material.name}'.")
+        self.report({'INFO'}, f"Applied '{self.image_name}' to '{active_obj.name}'.")
         return {'FINISHED'}
 
 
@@ -852,12 +918,14 @@ class ATLAS_OT_RunWorkflow(Operator):
         base_url = state.base_url.strip()
         timeout = preferences.get_effective_timeout(context)
         self._poll_interval = preferences.get_poll_interval(context)
+        api_key = preferences.get_workspace_api_key(context)
         
         try:
             client = AtlasAPIClient(
                 base_url=base_url,
                 version=state.version,
-                timeout=timeout if timeout else 0  # 0 means no timeout in requests
+                timeout=timeout if timeout else 0,  # 0 means no timeout in requests
+                api_key=api_key
             )
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
@@ -1229,6 +1297,7 @@ classes = (
     ATLAS_OT_RefreshJobHistory,
     ATLAS_OT_OpenJobFolder,
     ATLAS_OT_ViewJobOutputImage,
+    ATLAS_OT_ApplyJobOutputImage,
     ATLAS_OT_ImportJobOutputMesh,
     ATLAS_OT_OpenPreferences,
     ATLAS_OT_CopyToClipboard,

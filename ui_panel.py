@@ -13,6 +13,7 @@ Helper functions are used to draw the individual UI widgets for each
 parameter type, keeping the panel classes clean and focused.
 """
 
+import os
 import bpy
 from datetime import datetime, timezone, timedelta
 from . import custom_icons
@@ -418,6 +419,19 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             if full_job.ErrorNodeName:
                 error_box.label(text=f"Node: {full_job.ErrorNodeName}")
         
+        # === OUTPUTS SECTION (with actions) ===
+        # Put results before inputs so completed job details surface the useful artifacts first.
+        if full_job.OutputsSnapshot:
+            outputs_box = layout.box()
+            outputs_box.label(text="Outputs", icon='EXPORT')
+            
+            for out in full_job.OutputsSnapshot:
+                self._draw_output_param(outputs_box, out, full_job.JobFolderPath)
+        elif full_job.Status == 2:  # Completed
+            outputs_box = layout.box()
+            outputs_box.label(text="Outputs", icon='EXPORT')
+            outputs_box.label(text="No outputs were saved for this job.", icon='INFO')
+        
         # === INPUTS SECTION (disabled/read-only) ===
         if full_job.InputsSnapshot:
             inputs_box = layout.box()
@@ -428,14 +442,6 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             
             for inp in full_job.InputsSnapshot:
                 self._draw_input_param(inputs_col, inp)
-        
-        # === OUTPUTS SECTION (with actions) ===
-        if full_job.OutputsSnapshot:
-            outputs_box = layout.box()
-            outputs_box.label(text="Outputs", icon='EXPORT')
-            
-            for out in full_job.OutputsSnapshot:
-                self._draw_output_param(outputs_box, out, full_job.JobFolderPath)
         
         # === ACTION BUTTONS ===
         layout.separator()
@@ -503,13 +509,17 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             op.value = value_str
             
         elif param_type == 'string':
-            # String: Display + copy button
+            # String: Show the full generated text in a wrapped box.
             value = param.get('StringValue', '')
-            display = value[:20] + "..." if len(value) > 20 else value
-            row.label(text=display or "(empty)")
+            row.label(text="Text")
             if value:
                 op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
                 op.value = value
+                text_box = layout.box()
+                for line in self._wrap_text(value, 48):
+                    text_box.label(text=line)
+            else:
+                row.label(text="(empty)")
                 
         elif param_type == 'image':
             # Image: filename + View/Apply buttons
@@ -525,8 +535,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
                 op_view = actions_row.operator("atlas.view_job_output_image", text="View", icon='IMAGE_DATA')
                 op_view.file_path = file_path
                 
-                # Apply as texture (reuse existing operator concept)
-                op_apply = actions_row.operator("atlas.view_job_output_image", text="Apply", icon='TEXTURE')
+                op_apply = actions_row.operator("atlas.apply_job_output_image", text="Apply", icon='TEXTURE')
                 op_apply.file_path = file_path
             else:
                 row.label(text="(file not found)")

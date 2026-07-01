@@ -44,6 +44,13 @@ class AtlasAddonPreferences(AddonPreferences):
     bl_idname = __package__  # Must match the addon folder name
 
     # --- API Settings ---
+    workspace_api_key: StringProperty(
+        name="Workspace API Key",
+        description="Atlas workspace API key for platform API v0.2+. Falls back to API_KEY environment variable when empty",
+        default="",
+        subtype='PASSWORD',
+    )
+
     request_timeout: IntProperty(
         name="Request Timeout",
         description="Maximum time to wait for API requests (seconds). Set to 0 for no timeout",
@@ -145,6 +152,10 @@ class AtlasAddonPreferences(AddonPreferences):
         box.label(text="API Settings", icon='URL')
         
         col = box.column(align=True)
+        col.prop(self, "workspace_api_key")
+        if not get_workspace_api_key(context):
+            col.label(text="API v0.2+ requires a workspace API key or API_KEY env var.", icon='INFO')
+
         row = col.row()
         row.prop(self, "request_timeout")
         row.prop(self, "no_timeout_limit", text="No Limit", toggle=True)
@@ -390,6 +401,15 @@ def get_poll_interval(context=None) -> float:
         return 2.0  # Default
     
     return prefs.poll_interval
+
+
+def get_workspace_api_key(context=None) -> str:
+    """Get the workspace API key from preferences or the API_KEY environment variable."""
+    prefs = get_preferences(context)
+    if prefs and prefs.workspace_api_key.strip():
+        return prefs.workspace_api_key.strip()
+
+    return os.environ.get("API_KEY", "").strip()
 
 
 def check_storage_limit(context=None) -> bool:
