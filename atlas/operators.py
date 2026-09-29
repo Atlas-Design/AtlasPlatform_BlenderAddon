@@ -19,6 +19,8 @@ import threading
 import time
 import logging
 import uuid
+from array import array
+from dataclasses import dataclass
 log = logging.getLogger("atlas_workflow")
 
 # --- Blender and Addon-Specific Imports ---
@@ -71,26 +73,45 @@ def redraw_view3d_ui() -> None:
                         region.tag_redraw()
 
 
+_owned_temp_dirs = set()
+_active_temp_dirs = set()
+
+
+def create_job_temp_dir() -> str:
+    """Allocate a directory owned by this session and protect it while in use."""
+    path = os.path.realpath(tempfile.mkdtemp(prefix="atlas_workflow_"))
+    _owned_temp_dirs.add(path)
+    _active_temp_dirs.add(path)
+    return path
+
+
+def release_job_temp_dir(path: str) -> None:
+    """Remove only this job's directory, after uploads and persistence finish."""
+    if path not in _owned_temp_dirs:
+        return
+    _active_temp_dirs.discard(path)
+    # Never follow a replaced directory outside the path we allocated.
+    if os.path.realpath(path) != path:
+        log.warning(f"[Atlas] Refusing to remove replaced temp directory: {path}")
+        return
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning(f"[Atlas] Could not remove temp directory {path}: {exc}")
+        return
+    _owned_temp_dirs.discard(path)
+
+
 def cleanup_old_temp_dirs() -> None:
-    """
-    Finds and deletes all temporary directories created by this addon.
+    """Retry cleanup of inactive directories owned by this Blender session.
 
-    This helps prevent clutter in the system's temporary folder from previous
-    addon sessions.
+    Other jobs and other Blender processes may still need their files. Do not
+    sweep the system temp directory based on a shared filename prefix.
     """
-    temp_dir = tempfile.gettempdir()
-    deleted_count = 0
-    for dirname in os.listdir(temp_dir):
-        if dirname.startswith("atlas_workflow_"):
-            dirpath = os.path.join(temp_dir, dirname)
-            try:
-                shutil.rmtree(dirpath)
-                deleted_count += 1
-            except OSError as e:
-                log.warning(f"Failed to delete old temp dir {dirpath}: {e}")
-
-    if deleted_count > 0:
-        log.warning(f"[AtlasWorkflow] Cleaned up {deleted_count} old temp directories.")
+    for path in _owned_temp_dirs.copy() - _active_temp_dirs.copy():
+        release_job_temp_dir(path)
 
 
 # -------------------------------------------------------------------
@@ -128,7 +149,7 @@ class ATLAS_OT_LoadWorkflow(Operator, ImportHelper):
 
 
 class ATLAS_OT_ClearCache(Operator):
-    """Deletes all temporary folders created by the Atlas addon."""
+    """Clean this session's unused temporary folders, preserving active jobs."""
     bl_idname = "atlas.clear_cache"
     bl_label = "Clear Addon Cache"
     bl_options = {'REGISTER', 'UNDO'}
@@ -136,7 +157,7 @@ class ATLAS_OT_ClearCache(Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Runs the cleanup utility and reports the result."""
         cleanup_old_temp_dirs()
-        self.report({'INFO'}, "Atlas temporary cache cleared.")
+        self.report({'INFO'}, "Unused Atlas temporary files cleared; active jobs preserved.")
         return {'FINISHED'}
 
 
@@ -346,6 +367,30 @@ def _create_image_material(image_datablock, name_prefix: str = "Atlas Image"):
     return material
 
 
+def _assign_image_material(obj, material) -> None:
+    """Replace the active slot so its existing faces use the new material."""
+    if obj.material_slots:
+        obj.active_material = material
+    else:
+        obj.data.materials.append(material)
+        obj.active_material_index = 0
+
+
+def _save_image_as_png(image, path: str) -> None:
+    """Save current pixels as PNG without applying scene render settings."""
+    export_image = image.copy()
+    try:
+        # Image.copy alone does not reliably copy unsaved pixel edits.
+        pixels = array('f', [0.0]) * len(image.pixels)
+        image.pixels.foreach_get(pixels)
+        export_image.pixels.foreach_set(pixels)
+        export_image.filepath_raw = path
+        export_image.file_format = 'PNG'
+        export_image.save()
+    finally:
+        bpy.data.images.remove(export_image)
+
+
 def _set_viewports_to_material_preview(context: bpy.types.Context) -> None:
     """Switch wireframe/solid 3D viewports to Material Preview so image textures are visible."""
     if not context.screen:
@@ -422,8 +467,7 @@ class ATLAS_OT_ApplyJobOutputImage(Operator):
         try:
             img = _load_image_from_path(self.file_path)
             material = _create_image_material(img, "Atlas Output")
-            active_obj.data.materials.append(material)
-            active_obj.active_material_index = len(active_obj.data.materials) - 1
+            _assign_image_material(active_obj, material)
             _set_viewports_to_material_preview(context)
             self.report({'INFO'}, f"Applied '{img.name}' to '{active_obj.name}'.")
         except Exception as e:
@@ -654,8 +698,7 @@ class ATLAS_OT_ApplyOutputImage(Operator):
             return {'CANCELLED'}
 
         material = _create_image_material(image_datablock, "Atlas Output")
-        active_obj.data.materials.append(material)
-        active_obj.active_material_index = len(active_obj.data.materials) - 1
+        _assign_image_material(active_obj, material)
         _set_viewports_to_material_preview(context)
 
         self.report({'INFO'}, f"Applied '{self.image_name}' to '{active_obj.name}'.")
@@ -792,6 +835,20 @@ class ATLAS_OT_ImportOutputMesh(Operator):
 # -------------------------------------------------------------------
 
 
+@dataclass
+class WorkflowOutputResult:
+    """Job-owned output schema and values, independent of Blender's UI state."""
+    param_id: str
+    label: str
+    param_type: str
+    bool_value: bool = False
+    number_value: float = 0.0
+    string_value: str = ""
+    image_name: str = ""
+    mesh_name: str = ""
+    temp_file_path: str = ""
+
+
 class ATLAS_OT_RunWorkflow(Operator):
     """
     Executes the full Atlas workflow using a modal, background-threaded process.
@@ -831,6 +888,9 @@ class ATLAS_OT_RunWorkflow(Operator):
     _current_status: str = ""  # pending, running, completed, failed
     _import_plan: list = []  # A list of dicts describing downloaded files
     _outputs_result: dict | None = None
+    _output_params: list | None = None
+    _workflow_key: tuple | None = None
+    _cancelled: bool = False
     
     # --- Job Persistence ---
     _job: JobRecord | None = None
@@ -937,6 +997,8 @@ class ATLAS_OT_RunWorkflow(Operator):
         finally:
             # Signal to the main thread that the job is done.
             self._done = True
+            if self._cancelled:
+                release_job_temp_dir(self._temp_dir)
 
     # --- Modal Operator Methods (run in main thread) ---
 
@@ -952,14 +1014,20 @@ class ATLAS_OT_RunWorkflow(Operator):
             self.report({'ERROR'}, "No workflow loaded.")
             return {'CANCELLED'}
 
-        # --- 1. Pre-run cleanup and setup ---
+        # --- 1. Capture the workflow and allocate job-owned storage ---
         cleanup_old_temp_dirs()
-        self._temp_dir = tempfile.mkdtemp(prefix="atlas_workflow_")
+        self._temp_dir = create_job_temp_dir()
+        self._cancelled = False
+        self._workflow_key = self._get_workflow_key(state)
+        self._output_params = [
+            WorkflowOutputResult(p.param_id, p.label, p.param_type)
+            for p in state.outputs
+        ]
         payload = {}
         upload_plan = []
         output_file_types = {
             p.param_id: p.param_type.upper() 
-            for p in state.outputs 
+            for p in self._output_params
             if p.param_type in ('image', 'mesh')
         }
 
@@ -979,7 +1047,7 @@ class ATLAS_OT_RunWorkflow(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, str(e))
-            shutil.rmtree(self._temp_dir)
+            release_job_temp_dir(self._temp_dir)
             return {'CANCELLED'}
 
         # --- 3. Create API client with preferences ---
@@ -997,7 +1065,7 @@ class ATLAS_OT_RunWorkflow(Operator):
             )
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
-            shutil.rmtree(self._temp_dir)
+            release_job_temp_dir(self._temp_dir)
             return {'CANCELLED'}
         
         # Check storage limit warning
@@ -1008,12 +1076,17 @@ class ATLAS_OT_RunWorkflow(Operator):
 
         # --- 4. Create job record for persistence ---
         inputs_snapshot = self._create_inputs_snapshot(state)
-        self._job = job_manager.create_job(
-            workflow_id=state.active_api_id,
-            workflow_name=state.active_name,
-            workflow_version=state.version,
-            inputs_snapshot=inputs_snapshot
-        )
+        try:
+            self._job = job_manager.create_job(
+                workflow_id=state.active_api_id,
+                workflow_name=state.active_name,
+                workflow_version=state.version,
+                inputs_snapshot=inputs_snapshot
+            )
+        except Exception as exc:
+            release_job_temp_dir(self._temp_dir)
+            self.report({'ERROR'}, f"Could not create job: {exc}")
+            return {'CANCELLED'}
         log.info(f"[Atlas] Created job record: {self._job.JobId[:8]}")
 
         # --- 5. Start the background job and modal timer ---
@@ -1110,16 +1183,23 @@ class ATLAS_OT_RunWorkflow(Operator):
                 bpy.ops.atlas.refresh_job_history()
                 
                 redraw_view3d_ui()
+                release_job_temp_dir(self._temp_dir)
                 return {'CANCELLED'}
 
-            # --- SUCCESS: Update state and import results ---
-            self._update_primitive_outputs(state)
-            self._process_import_plan(state, context)
-            
-            # Complete the job record with outputs
-            if self._job:
-                outputs_snapshot = self._create_outputs_snapshot(state)
+            # Persist this job's results even if another workflow is selected.
+            try:
+                self._update_primitive_outputs()
+                self._process_import_plan(context)
+                outputs_snapshot = self._create_outputs_snapshot()
                 job_manager.complete_job(self._job, outputs_snapshot)
+                self._publish_outputs(state)
+            except Exception as exc:
+                job_manager.fail_job(self._job, f"Could not save results: {exc}")
+                self.report({'ERROR'}, f"{self._workflow_name}: Could not save results: {exc}")
+                bpy.ops.atlas.refresh_job_history()
+                return {'CANCELLED'}
+            finally:
+                release_job_temp_dir(self._temp_dir)
 
             state.job_status = "Workflow complete"
             state.job_progress = 1.0
@@ -1165,6 +1245,9 @@ class ATLAS_OT_RunWorkflow(Operator):
         # Remove this job from running_jobs
         self._remove_running_job(state)
         state.job_running = len(state.running_jobs) > 0
+        self._cancelled = True
+        if self._done:
+            release_job_temp_dir(self._temp_dir)
         
         log.info(f"[Atlas] Workflow {self._workflow_name} cancelled by user")
         # Note: The background thread is not forcefully stopped, but it will
@@ -1196,9 +1279,10 @@ class ATLAS_OT_RunWorkflow(Operator):
         Returns the path to the file that should be uploaded.
         """
         if item.source_type == 'FILE':
-            if not os.path.exists(item.file_path):
+            path = bpy.path.abspath(item.file_path)
+            if not os.path.isfile(path):
                 raise ValueError(f"Input file not found for '{item.label}': {item.file_path}")
-            return item.file_path
+            return path
 
         elif item.source_type == 'SCENE':
             if item.param_type == "image":
@@ -1206,7 +1290,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                 if not img:
                     raise ValueError(f"Input image not found in scene for '{item.label}': {item.image_name}")
                 temp_path = os.path.join(self._temp_dir, f"{item.param_id}.png")
-                img.save_render(filepath=temp_path)
+                _save_image_as_png(img, temp_path)
                 return temp_path
 
             elif item.param_type == "mesh":
@@ -1217,17 +1301,46 @@ class ATLAS_OT_RunWorkflow(Operator):
                 # Export the specific object to a temporary GLB file
                 temp_path = os.path.join(self._temp_dir, f"{item.param_id}.glb")
 
-                # Use a context override or temporary selection for precise export
-                with context.temp_override(active_object=obj, selected_objects=[obj]):
-                    bpy.ops.export_scene.gltf(filepath=temp_path, use_selection=True, export_format='GLB')
+                view_layer = context.view_layer
+                if obj.name not in view_layer.objects:
+                    raise ValueError(f"Input object is excluded from the active view layer: {obj.name}")
+                selected = [o for o in view_layer.objects if o.select_get()]
+                active = view_layer.objects.active
+                mode = active.mode if active else 'OBJECT'
+                hidden, viewport_hidden, selection_locked = obj.hide_get(), obj.hide_viewport, obj.hide_select
+                try:
+                    if mode != 'OBJECT':
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                    for selected_obj in selected:
+                        selected_obj.select_set(False)
+                    obj.hide_viewport = False
+                    obj.hide_set(False)
+                    obj.hide_select = False
+                    obj.select_set(True)
+                    view_layer.objects.active = obj
+                    result = bpy.ops.export_scene.gltf(
+                        filepath=temp_path, use_selection=True, export_format='GLB'
+                    )
+                    if 'FINISHED' not in result:
+                        raise RuntimeError(f"Could not export input object: {obj.name}")
+                finally:
+                    obj.select_set(False)
+                    obj.hide_set(hidden)
+                    obj.hide_viewport = viewport_hidden
+                    obj.hide_select = selection_locked
+                    for selected_obj in selected:
+                        selected_obj.select_set(True)
+                    view_layer.objects.active = active
+                    if active and mode != 'OBJECT' and active.mode != mode:
+                        bpy.ops.object.mode_set(mode=mode)
                 return temp_path
         return ""
 
-    def _update_primitive_outputs(self, state):
+    def _update_primitive_outputs(self):
         """Updates the state properties for primitive output types (str, bool, num)."""
         if self._outputs_result is None:
             return
-        for out_param in state.outputs:
+        for out_param in self._output_params:
             if out_param.param_id in self._outputs_result:
                 value = self._outputs_result[out_param.param_id]
                 try:
@@ -1240,15 +1353,17 @@ class ATLAS_OT_RunWorkflow(Operator):
                 except (ValueError, TypeError) as e:
                     log.warning(f"[Atlas] Could not set output '{out_param.param_id}': {e}")
 
-    def _process_import_plan(self, state, context):
+    def _process_import_plan(self, context):
         """Processes the downloaded files, importing them into Blender."""
         auto_import_meshes = preferences.should_auto_import_meshes(context)
         auto_apply_images = preferences.should_auto_apply_images(context)
         
         for item in self._import_plan:
-            out_param = next((p for p in state.outputs if p.param_id == item['param_id']), None)
+            out_param = next((p for p in self._output_params if p.param_id == item['param_id']), None)
             if not out_param:
                 continue
+            # Persist downloads even if their Blender import fails.
+            out_param.temp_file_path = item['path']
 
             if item['type'] == 'IMAGE':
                 try:
@@ -1300,18 +1415,18 @@ class ATLAS_OT_RunWorkflow(Operator):
                 snapshot.StringValue = item.string_value
             elif item.param_type == "image":
                 snapshot.ImageValue = item.image_name
-                snapshot.FilePath = item.file_path if item.source_type == 'FILE' else None
+                snapshot.FilePath = bpy.path.abspath(item.file_path) if item.source_type == 'FILE' else None
             elif item.param_type == "mesh":
                 snapshot.MeshValue = item.mesh_name
-                snapshot.FilePath = item.file_path if item.source_type == 'FILE' else None
+                snapshot.FilePath = bpy.path.abspath(item.file_path) if item.source_type == 'FILE' else None
             
             snapshots.append(snapshot)
         return snapshots
 
-    def _create_outputs_snapshot(self, state) -> list:
+    def _create_outputs_snapshot(self) -> list:
         """Create a snapshot of all output parameters after job completion."""
         snapshots = []
-        for item in state.outputs:
+        for item in self._output_params:
             snapshot = ParamSnapshot(
                 ParamId=item.param_id,
                 Label=item.label,
@@ -1333,6 +1448,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                         self._job, item.param_id, item.temp_file_path
                     )
                     snapshot.FilePath = saved_path
+                    item.temp_file_path = saved_path
             elif item.param_type == "mesh":
                 snapshot.MeshValue = item.mesh_name
                 # Save output file to job folder
@@ -1341,9 +1457,28 @@ class ATLAS_OT_RunWorkflow(Operator):
                         self._job, item.param_id, item.temp_file_path
                     )
                     snapshot.FilePath = saved_path
+                    item.temp_file_path = saved_path
             
             snapshots.append(snapshot)
         return snapshots
+
+    @staticmethod
+    def _get_workflow_key(state) -> tuple:
+        return (
+            state.active_api_id, state.base_url, state.version,
+            state.active_workflow_filepath,
+            tuple((p.param_id, p.param_type) for p in state.outputs),
+        )
+
+    def _publish_outputs(self, state) -> None:
+        """Update the selected workflow only when it still matches this job."""
+        if self._get_workflow_key(state) != self._workflow_key:
+            return
+        fields = ('bool_value', 'number_value', 'string_value',
+                  'image_name', 'mesh_name', 'temp_file_path')
+        for target, result in zip(state.outputs, self._output_params):
+            for name in fields:
+                setattr(target, name, getattr(result, name))
 
 
 # -------------------------------------------------------------------

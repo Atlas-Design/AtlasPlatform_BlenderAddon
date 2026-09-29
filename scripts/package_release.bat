@@ -31,7 +31,7 @@ if not exist "%DIST_DIR%" mkdir "%DIST_DIR%"
 if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
 
 robocopy "%ADDON_ROOT%" "%STAGING_ADDON%" /S /R:1 /W:1 ^
-    /XD ".git" "__pycache__" "atlas" "atlas_jobs" "atlas_workflows" ".idea" ".vscode" "docs" "dist" "release-staging" "scripts" ^
+    /XD ".git" "__pycache__" "atlas" "atlas_jobs" "atlas_workflows" ".idea" ".vscode" "docs" "dist" "release-staging" "scripts" "tests" ^
     /XF "*.pyc" "*.pyo" "*.blend1" "*.blend2" ".DS_Store" "Thumbs.db" ".gitignore" "ROADMAP.md"
 
 if errorlevel 8 (

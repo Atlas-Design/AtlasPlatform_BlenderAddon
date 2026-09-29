@@ -18,6 +18,7 @@ Helper functions are provided to synchronize this state with an abstract
 WorkflowDefinition.
 """
 import os
+import logging
 
 import bpy
 from bpy.props import (
@@ -38,6 +39,17 @@ try:
 except ImportError:
     from workflow_definition import WorkflowDefinition, ParamType
     import workflow_manager
+
+
+log = logging.getLogger("atlas_workflow")
+
+
+def _reset_library_selection():
+    """One-shot timer; resolve current state rather than retaining RNA objects."""
+    wm = bpy.context.window_manager
+    if wm and hasattr(wm, 'atlas_workflow_state'):
+        wm.atlas_workflow_state.saved_workflows_enum = '__NONE__'
+    return None
 
 
 # -------------------------------------------------------------------
@@ -363,9 +375,10 @@ class AtlasWorkflowState(PropertyGroup):
                     for area in context.screen.areas:
                         area.tag_redraw()
             except Exception as e:
-                self.report({'INFO'}, f"[Atlas] Failed to load workflow '{workflow_id}': {e}")
+                log.warning(f"[Atlas] Failed to load workflow '{workflow_id}': {e}")
 
-        bpy.app.timers.call_soon(lambda: setattr(self, 'saved_workflows_enum', '__NONE__'))
+        if not bpy.app.timers.is_registered(_reset_library_selection):
+            bpy.app.timers.register(_reset_library_selection, first_interval=0.0)
 
     saved_workflows_enum: EnumProperty(
         name="Saved Workflows",
@@ -391,7 +404,7 @@ def clear_workflow_state(state: AtlasWorkflowState) -> None:
     state.active_name = ""
     state.base_url = ""
     state.version = ""
-    state.job_running = False
+    state.job_running = bool(state.running_jobs)
     state.job_status = ""
     state.job_progress = 0.0
     state.job_elapsed_time = "0.0s"
@@ -502,6 +515,8 @@ def unregister():
     global state from the WindowManager and unregisters the classes in
     reverse order.
     """
+    if bpy.app.timers.is_registered(_reset_library_selection):
+        bpy.app.timers.unregister(_reset_library_selection)
     del bpy.types.WindowManager.atlas_workflow_state
 
     for cls in reversed(classes):
