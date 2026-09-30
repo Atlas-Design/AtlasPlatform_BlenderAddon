@@ -19,13 +19,15 @@ import threading
 import time
 import logging
 import uuid
+import json
+from types import SimpleNamespace
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 log = logging.getLogger("atlas_workflow")
 
 # --- Blender and Addon-Specific Imports ---
 import bpy
-from bpy.props import StringProperty
+from bpy.props import StringProperty, IntProperty, CollectionProperty, EnumProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 
@@ -40,6 +42,9 @@ try:
     from .job_manager import JobRecord, JobStatus, ParamSnapshot
     from .job_manager import ExecutionStatus as JobExecutionStatus
     from . import preferences
+    from . import native_assets
+    from .asset_types import (FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES,
+                              normalize_asset, output_extension, safe_file_key, compatible_asset, file_extension)
 except ImportError:
     from atlas_workflow_state import populate_state_from_definition
     from workflow_definition import WorkflowDefinition
@@ -51,6 +56,9 @@ except ImportError:
     from job_manager import JobRecord, JobStatus, ParamSnapshot
     from job_manager import ExecutionStatus as JobExecutionStatus
     import preferences
+    import native_assets
+    from asset_types import (FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES,
+                             normalize_asset, output_extension, safe_file_key, compatible_asset, file_extension)
 
 
 # -------------------------------------------------------------------
@@ -268,7 +276,10 @@ class ATLAS_OT_RefreshJobHistory(Operator):
         
         state = context.window_manager.atlas_workflow_state
         
-        # Clear existing history
+        # Preserve the inspected run when another job finishes or the list reorders.
+        selected_id = ""
+        if 0 <= state.job_history_index < len(state.job_history):
+            selected_id = state.job_history[state.job_history_index].job_id
         state.job_history.clear()
         state.job_history_index = -1
         
@@ -284,6 +295,8 @@ class ATLAS_OT_RefreshJobHistory(Operator):
             item.created_at = job.CreatedAtUtc
             item.status = job.Status
             item.job_folder_path = job.JobFolderPath
+            if job.JobId == selected_id:
+                state.job_history_index = len(state.job_history) - 1
             
             # Calculate display time
             try:
@@ -307,7 +320,8 @@ class ATLAS_OT_RefreshJobHistory(Operator):
             except:
                 item.created_at_display = "Unknown"
         
-        self.report({'INFO'}, f"Loaded {len(jobs)} jobs")
+        if state.job_history_index < 0:
+            state.job_history_detail_mode = False
         return {'FINISHED'}
 
 
@@ -376,8 +390,21 @@ def _assign_image_material(obj, material) -> None:
         obj.active_material_index = 0
 
 
-def _save_image_as_png(image, path: str) -> None:
-    """Save current pixels as PNG without applying scene render settings."""
+def _save_image_as_png(image, path: str, file_format='PNG') -> None:
+    """Save current pixels in a controlled format, without display transforms."""
+    if file_format == 'OPEN_EXR':
+        # Image.save applies the image's output conversion in Blender 5.1.
+        # Render-save to EXR writes linear floats; a separate scene keeps the
+        # user's render settings untouched and avoids quantization to PNG.
+        export_scene = bpy.data.scenes.new('Atlas EXR Export')
+        try:
+            export_scene.render.image_settings.file_format = 'OPEN_EXR'
+            export_scene.render.image_settings.color_depth = '32'
+            export_scene.render.image_settings.color_mode = 'RGBA'
+            image.save_render(path, scene=export_scene)
+        finally:
+            bpy.data.scenes.remove(export_scene)
+        return
     export_image = image.copy()
     try:
         # Image.copy alone does not reliably copy unsaved pixel edits.
@@ -385,7 +412,7 @@ def _save_image_as_png(image, path: str) -> None:
         image.pixels.foreach_get(pixels)
         export_image.pixels.foreach_set(pixels)
         export_image.filepath_raw = path
-        export_image.file_format = 'PNG'
+        export_image.file_format = file_format
         export_image.save()
     finally:
         bpy.data.images.remove(export_image)
@@ -599,19 +626,48 @@ class ATLAS_OT_SelectJob(Operator):
     """View job details"""
     bl_idname = "atlas.select_job"
     bl_label = "View Job Details"
+    bl_description = "Select this run in Job History; expand the panel if it is collapsed"
     bl_options = {'REGISTER'}
     
     job_index: bpy.props.IntProperty(
-        description="Index of the job to select"
+        description="Index of the job to select", default=-1
     )
+    job_id: bpy.props.StringProperty(description="Stable ID of the run to inspect")
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         state = context.window_manager.atlas_workflow_state
-        if 0 <= self.job_index < len(state.job_history):
-            state.job_history_index = self.job_index
+        index = self.job_index
+        if self.job_id:
+            bpy.ops.atlas.refresh_job_history()
+            index = next((i for i, job in enumerate(state.job_history)
+                          if job.job_id == self.job_id), -1)
+        if 0 <= index < len(state.job_history):
+            state.filter_status = 'ALL'
+            state.filter_workflow = 'ALL'
+            state.filter_date = 'ALL'
+            state.job_history_index = index
             state.job_history_detail_mode = True
             state.job_detail_outputs_expanded = True
             state.job_detail_inputs_expanded = False
+            redraw_view3d_ui()
+        else:
+            self.report({'WARNING'}, "This job is no longer available in Job History.")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class ATLAS_OT_DismissJobNotice(Operator):
+    """Dismiss this notice; the run and its results remain in Job History"""
+    bl_idname = "atlas.dismiss_job_notice"
+    bl_label = "Dismiss Notification"
+    job_id: bpy.props.StringProperty()
+
+    def execute(self, context):
+        notices = context.window_manager.atlas_workflow_state.job_notices
+        for index, notice in enumerate(notices):
+            if notice.job_id == self.job_id:
+                notices.remove(index)
+                break
         return {'FINISHED'}
 
 
@@ -635,6 +691,9 @@ class ATLAS_OT_PickInputFile(Operator, ImportHelper):
     # We pass these arguments from the UI to tell the operator what to look for
     param_id: StringProperty()
     file_type: StringProperty()  # 'image' or 'mesh'
+    item_index: IntProperty(default=-1)
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement)
+    directory: StringProperty(subtype='DIR_PATH')
 
     # This is updated dynamically in invoke() based on file_type
     filter_glob: StringProperty(
@@ -648,8 +707,13 @@ class ATLAS_OT_PickInputFile(Operator, ImportHelper):
             self.filter_glob = "*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.tif;*.tiff;*.webp"
         elif self.file_type == 'mesh':
             self.filter_glob = "*.glb;*.gltf"  # Restrict to GLB/GLTF as requested
+        elif self.file_type == 'audio':
+            self.filter_glob = '*.mp3;*.wav;*.ogg;*.flac;*.m4a'
+        elif self.file_type == 'video':
+            self.filter_glob = '*.mp4;*.webm;*.mov;*.avi'
         else:
-            self.filter_glob = "*"
+            ext = FILE_FORMATS.get(self.file_type)
+            self.filter_glob = f'*.{ext}' if ext else '*'
 
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
@@ -661,10 +725,121 @@ class ATLAS_OT_PickInputFile(Operator, ImportHelper):
         target_param = next((p for p in state.inputs if p.param_id == self.param_id), None)
 
         if target_param:
-            target_param.file_path = self.filepath
-            # Optional: Report success to log
-            # self.report({'INFO'}, f"Selected: {self.filepath}")
+            if target_param.is_array and self.item_index < 0:
+                paths = [os.path.join(self.directory, entry.name) for entry in self.files] or [self.filepath]
+                for path in paths:
+                    entry = target_param.asset_items.add()
+                    entry.source_type, entry.file_path = 'FILE', path
+            else:
+                if target_param.is_array and self.item_index >= len(target_param.asset_items):
+                    return {'CANCELLED'}
+                entry = target_param.asset_items[self.item_index] if target_param.is_array else target_param
+                entry.source_type, entry.file_path = 'FILE', self.filepath
 
+        return {'FINISHED'}
+
+
+class ATLAS_OT_EditAssetList(Operator):
+    """Edit an ordered input list without merging its assets."""
+    bl_idname = 'atlas.edit_asset_list'
+    bl_label = 'Edit Asset List'
+    param_id: StringProperty()
+    action: StringProperty(default='ADD')
+    item_index: IntProperty(default=-1)
+
+    def execute(self, context):
+        state = context.window_manager.atlas_workflow_state
+        param = next((p for p in state.inputs if p.param_id == self.param_id), None)
+        if not param or not param.is_array:
+            return {'CANCELLED'}
+        items = param.asset_items
+        if self.action == 'ADD':
+            item = items.add()
+            item.source_type = 'SCENE' if param.param_type in SCENE_INPUT_TYPES else 'FILE'
+            item.frame_start, item.frame_end = context.scene.frame_start, context.scene.frame_end
+        elif 0 <= self.item_index < len(items):
+            if self.action == 'REMOVE':
+                items.remove(self.item_index)
+            else:
+                destination = self.item_index + (-1 if self.action == 'UP' else 1)
+                if 0 <= destination < len(items):
+                    items.move(self.item_index, destination)
+        return {'FINISHED'}
+
+
+_reuse_targets = []
+
+
+def _get_reuse_targets(self, context):
+    global _reuse_targets
+    state = context.window_manager.atlas_workflow_state
+    _reuse_targets = [(p.param_id, p.label, p.param_type) for p in state.inputs
+                      if compatible_asset(self.param_type, p.param_type)]
+    return _reuse_targets
+
+
+class ATLAS_OT_ReuseAsset(Operator):
+    """Send a result asset ID to a compatible input without uploading again."""
+    bl_idname = 'atlas.reuse_asset'
+    bl_label = 'Use as Input'
+    param_type: StringProperty()
+    asset_data: StringProperty(options={'HIDDEN'})
+    target_param: EnumProperty(name='Input', items=_get_reuse_targets)
+
+    def invoke(self, context, event):
+        if not _get_reuse_targets(self, context):
+            self.report({'WARNING'}, 'Load a workflow with a compatible input first.')
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        state = context.window_manager.atlas_workflow_state
+        target = next((p for p in state.inputs if p.param_id == self.target_param), None)
+        if not target or not compatible_asset(self.param_type, target.param_type):
+            return {'CANCELLED'}
+        records = json.loads(self.asset_data)
+        if any(r.get('ApiOrigin', '').rstrip('/') not in ('', state.base_url.rstrip('/')) for r in records):
+            self.report({'ERROR'}, 'This asset belongs to a different Atlas API environment.')
+            return {'CANCELLED'}
+        if not records or any(not r.get('AssetId') for r in records):
+            self.report({'ERROR'}, 'This result has no reusable asset ID.')
+            return {'CANCELLED'}
+        if not target.is_array and len(records) != 1:
+            self.report({'ERROR'}, 'Choose an array input or reuse one item.')
+            return {'CANCELLED'}
+        for record in records:
+            entry = target.asset_items.add() if target.is_array else target
+            entry.source_type = 'ASSET'
+            entry.asset_id = record['AssetId']
+        target.provided = True
+        return {'FINISHED'}
+
+
+class ATLAS_OT_ImportMeshList(Operator):
+    """Import downloaded meshes into separate collections."""
+    bl_idname = 'atlas.import_mesh_list'
+    bl_label = 'Import All Meshes'
+    bl_options = {'REGISTER', 'UNDO'}
+    paths_json: StringProperty(options={'HIDDEN'})
+
+    def execute(self, context):
+        failures = []
+        for index, path in enumerate(json.loads(self.paths_json)):
+            try:
+                previous = set(context.scene.objects)
+                result = bpy.ops.import_scene.gltf(filepath=path)
+                if 'FINISHED' not in result:
+                    raise RuntimeError('Importer cancelled')
+                collection = bpy.data.collections.new(f'Atlas Mesh {index + 1}')
+                context.scene.collection.children.link(collection)
+                for obj in set(context.scene.objects) - previous:
+                    for owner in list(obj.users_collection):
+                        owner.objects.unlink(obj)
+                    collection.objects.link(obj)
+            except Exception as exc:
+                failures.append(f'{index + 1}: {exc}')
+        if failures:
+            self.report({'WARNING'}, '; '.join(failures))
         return {'FINISHED'}
 
 # -------------------------------------------------------------------
@@ -847,6 +1022,10 @@ class WorkflowOutputResult:
     image_name: str = ""
     mesh_name: str = ""
     temp_file_path: str = ""
+    is_array: bool = False
+    file_format: str = ''
+    items: list = field(default_factory=list)
+    raw_value: object = None
 
 
 class ATLAS_OT_RunWorkflow(Operator):
@@ -918,20 +1097,25 @@ class ATLAS_OT_RunWorkflow(Operator):
         try:
             # STAGE 1: UPLOAD FILES
             if upload_plan:
+                self._current_status = "uploading"
                 for i, item in enumerate(upload_plan):
                     self._status_message = f"Uploading {os.path.basename(item['path'])} ({i + 1}/{len(upload_plan)})..."
                     file_id = client.upload_file(api_id, item['path'])
-                    payload[item['param_id']] = file_id  # Replace local path with remote file_id
+                    if item.get('index') is None:
+                        payload[item['param_id']] = file_id
+                    else:
+                        payload[item['param_id']][item['index']] = file_id
                     log.info(f"[Atlas] Uploaded {item['param_id']}: {file_id}")
 
             # STAGE 2: EXECUTE WORKFLOW (ASYNC)
             self._status_message = "Submitting workflow..."
-            self._current_status = "pending"
+            self._current_status = "submitting"
             execution_id = client.execute_async(api_id, payload)
             log.info(f"[Atlas] Execution started: {execution_id}")
 
             # STAGE 3: POLL FOR COMPLETION
             self._status_message = "Waiting for execution..."
+            self._current_status = "pending"
             while True:
                 time.sleep(self._poll_interval)
                 
@@ -964,29 +1148,41 @@ class ATLAS_OT_RunWorkflow(Operator):
 
             # STAGE 4: DOWNLOAD RESULTING FILES
             self._import_plan = []
-            output_ids_to_download = {
-                k: v for k, v in self._outputs_result.items() 
-                if k in output_file_types and v  # Only download if we have a file_id
-            }
+            errors = []
+            for param_index, param in enumerate(self._output_params):
+                param.raw_value = self._outputs_result.get(param.param_id)
+                if param.param_type not in FILE_FORMATS or param.raw_value is None:
+                    continue
+                values = param.raw_value if param.is_array else [param.raw_value]
+                if not isinstance(values, list):
+                    errors.append(f'{param.label}: expected an array of assets')
+                    continue
+                for index, value in enumerate(values):
+                    record = {'Index': index, 'AssetId': '', 'FilePath': '', 'Error': '',
+                              'ApiOrigin': self._api_origin, 'Format': param.file_format}
+                    param.items.append(record)
+                    try:
+                        asset = normalize_asset(value)
+                        record.update(AssetId=asset.fid, DownloadUrl=asset.download_url,
+                                      Mime=asset.mime, Filename=asset.filename, Size=asset.size)
+                        ext = output_extension(param.param_type, param.file_format, asset.mime, asset.filename)
+                        name = f'{param_index}_{safe_file_key(param.param_id)}_{index}.{ext}'
+                        path = os.path.join(self._temp_dir, name)
+                        self._status_message = f'Downloading {param.label} [{index + 1}/{len(values)}]...'
+                        self._current_status = "downloading"
+                        record['FilePath'] = client.download_file(api_id, value, path)
+                        record['Format'] = file_extension(record['FilePath'])
+                        self._import_plan.append({'param_id': param.param_id, 'type': param.param_type.upper(),
+                                                  'path': record['FilePath'], 'index': index})
+                    except Exception as exc:
+                        record['Error'] = str(exc)
+                        errors.append(f'{param.label}[{index}]: {exc}')
 
-            if output_ids_to_download:
-                count = len(output_ids_to_download)
-                for i, (param_id, file_id) in enumerate(output_ids_to_download.items()):
-                    self._status_message = f"Downloading result ({i + 1}/{count})..."
-                    file_type = output_file_types[param_id]
-                    ext = ".png" if file_type == 'IMAGE' else ".glb"
-                    temp_path = os.path.join(self._temp_dir, f"{param_id}{ext}")
+            if errors:
+                self._error = '; '.join(errors)
 
-                    client.download_file(api_id, file_id, temp_path)
-                    self._import_plan.append({
-                        'param_id': param_id, 
-                        'type': file_type, 
-                        'path': temp_path
-                    })
-                    log.info(f"[Atlas] Downloaded {param_id} to {temp_path}")
-
-            self._status_message = "Workflow finished successfully."
-            self._current_status = "completed"
+            self._status_message = self._error or "Workflow finished successfully."
+            self._current_status = "failed" if self._error else "completed"
 
         except Exception as e:
             # If anything goes wrong, record the error for the main thread.
@@ -1020,30 +1216,17 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._cancelled = False
         self._workflow_key = self._get_workflow_key(state)
         self._output_params = [
-            WorkflowOutputResult(p.param_id, p.label, p.param_type)
+            WorkflowOutputResult(p.param_id, p.label, p.param_type,
+                                 is_array=p.is_array, file_format=p.file_format)
             for p in state.outputs
         ]
-        payload = {}
-        upload_plan = []
-        output_file_types = {
-            p.param_id: p.param_type.upper() 
-            for p in self._output_params
-            if p.param_type in ('image', 'mesh')
-        }
+        self._api_origin = state.base_url.rstrip('/')
+        output_file_types = {}  # Output definitions are captured per job above.
 
         # --- 2. Build payload and upload plan from input parameters ---
         try:
-            for item in state.inputs:
-                if item.param_type == "boolean":
-                    payload[item.param_id] = item.bool_value
-                elif item.param_type == "number":
-                    payload[item.param_id] = item.number_value
-                elif item.param_type == "string":
-                    payload[item.param_id] = item.string_value
-                elif item.param_type in ("image", "mesh"):
-                    path_to_upload = self._prepare_datablock_for_upload(context, item)
-                    if path_to_upload:
-                        upload_plan.append({'param_id': item.param_id, 'path': path_to_upload})
+            output_copy_root = preferences.prepare_output_copy_root(context)
+            payload, upload_plan = self._build_payload(context, state)
 
         except Exception as e:
             self.report({'ERROR'}, str(e))
@@ -1052,6 +1235,7 @@ class ATLAS_OT_RunWorkflow(Operator):
 
         # --- 3. Create API client with preferences ---
         base_url = state.base_url.strip()
+        preferences.configure_logging(context)
         timeout = preferences.get_effective_timeout(context)
         self._poll_interval = preferences.get_poll_interval(context)
         api_key = preferences.get_workspace_api_key(context)
@@ -1072,7 +1256,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         if preferences.check_storage_limit(context):
             prefs = preferences.get_preferences(context)
             if prefs and prefs.warn_on_storage_limit:
-                self.report({'WARNING'}, "Job storage limit exceeded. Consider cleaning up old jobs.")
+                self.report({'WARNING'}, "Job storage warning threshold exceeded. Consider cleaning up old jobs.")
 
         # --- 4. Create job record for persistence ---
         inputs_snapshot = self._create_inputs_snapshot(state)
@@ -1081,7 +1265,8 @@ class ATLAS_OT_RunWorkflow(Operator):
                 workflow_id=state.active_api_id,
                 workflow_name=state.active_name,
                 workflow_version=state.version,
-                inputs_snapshot=inputs_snapshot
+                inputs_snapshot=inputs_snapshot,
+                output_copy_root=output_copy_root,
             )
         except Exception as exc:
             release_job_temp_dir(self._temp_dir)
@@ -1099,7 +1284,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._import_plan = []
         self._outputs_result = None
         self._status_message = "Initializing..."
-        self._current_status = "pending"
+        self._current_status = "initializing"
         self._start_time = time.time()
         
         # Store workflow name for this job
@@ -1118,7 +1303,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         running_job.progress = 0.0
         running_job.started_at = started_at
         running_job.elapsed_time = "0.0s"
-        running_job.current_phase = "pending"
+        running_job.current_phase = "initializing"
         
         # Legacy single-job state (for backwards compatibility)
         state.job_running = True
@@ -1134,6 +1319,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         # Start the modal timer to check for thread completion
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
         context.window_manager.modal_handler_add(self)
+        self.report({'INFO'}, f"{self._workflow_name}: Run started. View in Job History from Running Jobs.")
         
         log.info(f"[Atlas] Started workflow execution: {state.active_name}")
         return {'RUNNING_MODAL'}
@@ -1159,7 +1345,7 @@ class ATLAS_OT_RunWorkflow(Operator):
             # Update legacy state
             state.job_running = len(state.running_jobs) > 0
 
-            if self._error:
+            if self._error and self._outputs_result is None:
                 # Handle errors from the background thread
                 state.job_status = self._status_message
                 error_report = self._error
@@ -1176,11 +1362,13 @@ class ATLAS_OT_RunWorkflow(Operator):
                         node_id=self._error_node_id
                     )
                 
-                self.report({'ERROR'}, f"{self._workflow_name}: {error_report}")
+                if preferences.should_notify(context, on_error=True):
+                    self.report({'ERROR'}, f"{self._workflow_name}: {error_report}")
                 log.error(f"[Atlas] Workflow failed: {error_report}")
                 
                 # Refresh job history so failed job appears
                 bpy.ops.atlas.refresh_job_history()
+                self._notify_completion(state, failed=True)
                 
                 redraw_view3d_ui()
                 release_job_temp_dir(self._temp_dir)
@@ -1192,46 +1380,50 @@ class ATLAS_OT_RunWorkflow(Operator):
                 self._process_import_plan(context)
                 outputs_snapshot = self._create_outputs_snapshot()
                 job_manager.complete_job(self._job, outputs_snapshot)
+                try:
+                    job_manager.export_output_copies(self._job)
+                except OSError as exc:
+                    self._error = '; '.join(filter(None, (self._error, str(exc))))
+                if self._error:
+                    job_manager.fail_job(self._job, self._error)
                 self._publish_outputs(state)
             except Exception as exc:
                 job_manager.fail_job(self._job, f"Could not save results: {exc}")
-                self.report({'ERROR'}, f"{self._workflow_name}: Could not save results: {exc}")
+                if preferences.should_notify(context, on_error=True):
+                    self.report({'ERROR'}, f"{self._workflow_name}: Could not save results: {exc}")
                 bpy.ops.atlas.refresh_job_history()
+                self._notify_completion(state, failed=True)
+                redraw_view3d_ui()
                 return {'CANCELLED'}
             finally:
                 release_job_temp_dir(self._temp_dir)
 
-            state.job_status = "Workflow complete"
+            state.job_status = self._error or "Workflow complete"
             state.job_progress = 1.0
-            self.report({'INFO'}, f"{self._workflow_name}: Completed successfully")
-            log.info(f"[Atlas] Workflow {self._workflow_name} completed successfully")
+            if preferences.should_notify(context, on_error=bool(self._error)):
+                self.report({'ERROR'} if self._error else {'INFO'},
+                            f"{self._workflow_name}: {self._error or 'Completed successfully'}")
+            log.info(f"[Atlas] Workflow {self._workflow_name}: {self._error or 'completed successfully'}")
             
             # Refresh job history so completed job appears
             bpy.ops.atlas.refresh_job_history()
+            self._notify_completion(state, failed=bool(self._error))
             
             redraw_view3d_ui()
-            return {'FINISHED'}
+            return {'CANCELLED'} if self._error else {'FINISHED'}
 
         else:
             # --- JOB STILL RUNNING ---
             elapsed = time.time() - self._start_time
             elapsed_str = f"{elapsed:.1f}s"
             
-            # Calculate progress for UI
-            if self._current_status == "running":
-                spinner_period = 2.0
-                progress = 0.2 + 0.6 * ((elapsed % spinner_period) / spinner_period)
-            else:
-                spinner_period = 3.0
-                progress = 0.1 * ((elapsed % spinner_period) / spinner_period)
-            
             # Update running_job entry in collection
-            self._update_running_job(state, self._status_message, progress, elapsed_str, self._current_status)
+            self._update_running_job(state, self._status_message, elapsed_str, self._current_status)
             
             # Legacy state update
             state.job_elapsed_time = elapsed_str
             state.job_status = self._status_message
-            state.job_progress = progress
+            state.job_progress = 0.0  # Server does not supply measured progress.
 
             redraw_view3d_ui()
             return {'RUNNING_MODAL'}
@@ -1253,12 +1445,24 @@ class ATLAS_OT_RunWorkflow(Operator):
         # Note: The background thread is not forcefully stopped, but it will
         # complete without affecting the Blender state further.
 
-    def _update_running_job(self, state, status: str, progress: float, elapsed: str, phase: str):
+    def _notify_completion(self, state, failed=False):
+        """Leave navigation to the user; each notice belongs to one run."""
+        if not self._job or not preferences.should_notify(on_error=failed):
+            return
+        # Bound sidebar space; older runs always remain available in history.
+        if len(state.job_notices) >= 5:
+            state.job_notices.remove(0)
+        notice = state.job_notices.add()
+        notice.job_id = self._job.JobId
+        notice.workflow_name = self._workflow_name
+        notice.failed = failed
+
+    def _update_running_job(self, state, status: str, elapsed: str, phase: str):
         """Update this job's entry in the running_jobs collection."""
         for job in state.running_jobs:
             if job.job_id == self._running_job_id:
                 job.status = status
-                job.progress = progress
+                job.progress = 0.0
                 job.elapsed_time = elapsed
                 job.current_phase = phase
                 break
@@ -1271,6 +1475,44 @@ class ATLAS_OT_RunWorkflow(Operator):
                 break
 
     # --- Helper methods for execute() and modal() ---
+
+    def _build_payload(self, context, state):
+        payload, uploads = {}, []
+        for position, item in enumerate(state.inputs):
+            if not item.provided:
+                if item.required == 'REQUIRED':
+                    raise ValueError(f'{item.label} is required')
+                continue
+            if item.param_type in PRIMITIVE_TYPES and not item.is_array:
+                attr = {'boolean': 'bool_value', 'number': 'number_value', 'string': 'string_value'}[item.param_type]
+                payload[item.param_id] = getattr(item, attr)
+                continue
+            if item.param_type not in FILE_FORMATS:
+                raise ValueError(f'{item.label}: unsupported input type {item.param_type}; omit it only if the API allows it')
+            entries = item.asset_items if item.is_array else [item]
+            if item.is_array:
+                payload[item.param_id] = [None] * len(entries)
+            for index, entry in enumerate(entries):
+                if entry.source_type == 'ASSET':
+                    fid = entry.asset_id.strip()
+                    if not fid:
+                        raise ValueError(f'{item.label}[{index}]: asset ID is empty')
+                    if item.is_array:
+                        payload[item.param_id][index] = fid
+                    else:
+                        payload[item.param_id] = fid
+                    continue
+                source = SimpleNamespace(
+                    source_type=entry.source_type, file_path=entry.file_path,
+                    image_name=entry.image_name, mesh_name=entry.mesh_name,
+                    param_type=item.param_type, label=f'{item.label}[{index}]' if item.is_array else item.label,
+                    param_id=f'{position}_{safe_file_key(item.param_id)}_{index}',
+                    frame_start=entry.frame_start, frame_end=entry.frame_end,
+                )
+                path = self._prepare_datablock_for_upload(context, source)
+                uploads.append({'param_id': item.param_id, 'path': path,
+                                'index': index if item.is_array else None})
+        return payload, uploads
 
     def _prepare_datablock_for_upload(self, context, item) -> str:
         """
@@ -1285,12 +1527,21 @@ class ATLAS_OT_RunWorkflow(Operator):
             return path
 
         elif item.source_type == 'SCENE':
-            if item.param_type == "image":
+            if item.param_type == 'scene':
+                return native_assets.export_scene_snapshot(context, os.path.join(self._temp_dir, f'{item.param_id}.blend'))
+            if item.param_type == 'usdz':
+                return native_assets.export_usdz(context, context.scene.objects.get(item.mesh_name),
+                                                 os.path.join(self._temp_dir, f'{item.param_id}.usdz'))
+            if item.param_type == 'rig_animation':
+                return native_assets.export_animation(context, context.scene.objects.get(item.mesh_name),
+                    os.path.join(self._temp_dir, f'{item.param_id}.glb'), item.frame_start, item.frame_end)
+            if item.param_type in ('image', 'exr'):
                 img = bpy.data.images.get(item.image_name)
                 if not img:
                     raise ValueError(f"Input image not found in scene for '{item.label}': {item.image_name}")
-                temp_path = os.path.join(self._temp_dir, f"{item.param_id}.png")
-                _save_image_as_png(img, temp_path)
+                ext = 'exr' if item.param_type == 'exr' else 'png'
+                temp_path = os.path.join(self._temp_dir, f"{item.param_id}.{ext}")
+                _save_image_as_png(img, temp_path, 'OPEN_EXR' if ext == 'exr' else 'PNG')
                 return temp_path
 
             elif item.param_type == "mesh":
@@ -1334,7 +1585,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                     if active and mode != 'OBJECT' and active.mode != mode:
                         bpy.ops.object.mode_set(mode=mode)
                 return temp_path
-        return ""
+        raise ValueError(f'{item.label}: select a file or existing asset; Blender data is not supported for {item.param_type}')
 
     def _update_primitive_outputs(self):
         """Updates the state properties for primitive output types (str, bool, num)."""
@@ -1343,6 +1594,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         for out_param in self._output_params:
             if out_param.param_id in self._outputs_result:
                 value = self._outputs_result[out_param.param_id]
+                out_param.raw_value = value
                 try:
                     if out_param.param_type == "boolean":
                         out_param.bool_value = bool(value)
@@ -1362,10 +1614,12 @@ class ATLAS_OT_RunWorkflow(Operator):
             out_param = next((p for p in self._output_params if p.param_id == item['param_id']), None)
             if not out_param:
                 continue
+            if out_param.is_array:
+                continue  # Large result lists stay on disk until explicitly opened.
             # Persist downloads even if their Blender import fails.
             out_param.temp_file_path = item['path']
 
-            if item['type'] == 'IMAGE':
+            if out_param.param_type in RASTER_TYPES:
                 try:
                     img = bpy.data.images.load(item['path'])
                     img.pack()  # Pack into the .blend file
@@ -1404,7 +1658,23 @@ class ATLAS_OT_RunWorkflow(Operator):
                 Label=item.label,
                 ParamType=item.param_type,
                 SourceType=0 if item.source_type == 'SCENE' else 1,
+                IsArray=getattr(item, 'is_array', False),
+                Provided=getattr(item, 'provided', True),
+                AssetId=getattr(item, 'asset_id', ''),
             )
+            if snapshot.IsArray:
+                snapshot.Items = [dict(Index=i, SourceType=entry.source_type, AssetId=entry.asset_id,
+                                       FilePath=bpy.path.abspath(entry.file_path) if entry.source_type == 'FILE' else '',
+                                       ImageValue=entry.image_name, MeshValue=entry.mesh_name,
+                                       SceneValue=bpy.context.scene.name if item.param_type == 'scene' and entry.source_type == 'SCENE' else '',
+                                       FrameStart=entry.frame_start if item.param_type == 'rig_animation' and entry.source_type == 'SCENE' else None,
+                                       FrameEnd=entry.frame_end if item.param_type == 'rig_animation' and entry.source_type == 'SCENE' else None)
+                                  for i, entry in enumerate(item.asset_items)]
+            elif item.source_type == 'SCENE':
+                if item.param_type == 'scene':
+                    snapshot.SceneValue = bpy.context.scene.name
+                elif item.param_type == 'rig_animation':
+                    snapshot.FrameStart, snapshot.FrameEnd = item.frame_start, item.frame_end
             
             # Set values based on type
             if item.param_type == "boolean":
@@ -1413,10 +1683,8 @@ class ATLAS_OT_RunWorkflow(Operator):
                 snapshot.NumberValue = item.number_value
             elif item.param_type == "string":
                 snapshot.StringValue = item.string_value
-            elif item.param_type == "image":
+            elif item.param_type in FILE_FORMATS:
                 snapshot.ImageValue = item.image_name
-                snapshot.FilePath = bpy.path.abspath(item.file_path) if item.source_type == 'FILE' else None
-            elif item.param_type == "mesh":
                 snapshot.MeshValue = item.mesh_name
                 snapshot.FilePath = bpy.path.abspath(item.file_path) if item.source_type == 'FILE' else None
             
@@ -1426,11 +1694,15 @@ class ATLAS_OT_RunWorkflow(Operator):
     def _create_outputs_snapshot(self) -> list:
         """Create a snapshot of all output parameters after job completion."""
         snapshots = []
-        for item in self._output_params:
+        for position, item in enumerate(self._output_params):
             snapshot = ParamSnapshot(
                 ParamId=item.param_id,
                 Label=item.label,
                 ParamType=item.param_type,
+                IsArray=item.is_array,
+                Format=item.file_format,
+                ApiOrigin=getattr(self, '_api_origin', ''),
+                RawValue=item.raw_value,
             )
             
             # Set values based on type
@@ -1440,24 +1712,19 @@ class ATLAS_OT_RunWorkflow(Operator):
                 snapshot.NumberValue = item.number_value
             elif item.param_type == "string":
                 snapshot.StringValue = item.string_value
-            elif item.param_type == "image":
+            elif item.param_type in FILE_FORMATS:
                 snapshot.ImageValue = item.image_name
-                # Save output file to job folder
-                if self._job and item.temp_file_path:
-                    saved_path = job_manager.save_output_file_to_job(
-                        self._job, item.param_id, item.temp_file_path
-                    )
-                    snapshot.FilePath = saved_path
-                    item.temp_file_path = saved_path
-            elif item.param_type == "mesh":
                 snapshot.MeshValue = item.mesh_name
-                # Save output file to job folder
-                if self._job and item.temp_file_path:
-                    saved_path = job_manager.save_output_file_to_job(
-                        self._job, item.param_id, item.temp_file_path
-                    )
-                    snapshot.FilePath = saved_path
-                    item.temp_file_path = saved_path
+                for record in item.items:
+                    if self._job and record.get('FilePath'):
+                        key = f'{position}_{safe_file_key(item.param_id)}_{record["Index"]}'
+                        record['FilePath'] = job_manager.save_output_file_to_job(self._job, key, record['FilePath'])
+                snapshot.Items = [dict(r) for r in item.items]
+                if not item.is_array and item.items:
+                    first = item.items[0]
+                    snapshot.FilePath = first.get('FilePath')
+                    snapshot.AssetId = first.get('AssetId', '')
+                    item.temp_file_path = snapshot.FilePath or ''
             
             snapshots.append(snapshot)
         return snapshots
@@ -1467,7 +1734,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         return (
             state.active_api_id, state.base_url, state.version,
             state.active_workflow_filepath,
-            tuple((p.param_id, p.param_type) for p in state.outputs),
+            tuple((p.param_id, p.param_type, p.is_array, p.file_format) for p in state.outputs),
         )
 
     def _publish_outputs(self, state) -> None:
@@ -1479,6 +1746,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         for target, result in zip(state.outputs, self._output_params):
             for name in fields:
                 setattr(target, name, getattr(result, name))
+            target.asset_id = result.items[0].get('AssetId', '') if result.items and not result.is_array else ''
 
 
 # -------------------------------------------------------------------
@@ -1486,6 +1754,10 @@ class ATLAS_OT_RunWorkflow(Operator):
 # -------------------------------------------------------------------
 
 classes = (
+    *native_assets.classes,
+    ATLAS_OT_EditAssetList,
+    ATLAS_OT_ReuseAsset,
+    ATLAS_OT_ImportMeshList,
     ATLAS_OT_LoadWorkflow,
     ATLAS_OT_SaveActiveWorkflow,
     ATLAS_OT_DeleteWorkflow,
@@ -1506,6 +1778,7 @@ classes = (
     ATLAS_OT_CopyToClipboard,
     ATLAS_OT_ViewTextOutput,
     ATLAS_OT_SelectJob,
+    ATLAS_OT_DismissJobNotice,
     ATLAS_OT_BackToJobList,
 )
 

@@ -4,6 +4,8 @@ Uses real Blender data and exporters, with a fake Atlas transport. All files and
 job history live in an isolated temporary directory; no API requests are made.
 """
 import importlib
+import io
+import logging
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,11 @@ addon = importlib.import_module(ROOT.name)
 ops = addon.operators
 state_module = addon.atlas_workflow_state
 jobs = ops.job_manager
+REAL_API_KEY = ops.preferences.get_workspace_api_key
+REAL_POLL_INTERVAL = ops.preferences.get_poll_interval
+REAL_STORAGE_CHECK = ops.preferences.check_storage_limit
+REAL_AUTO_IMPORT = ops.preferences.should_auto_import_meshes
+REAL_AUTO_APPLY = ops.preferences.should_auto_apply_images
 
 # Exercise the real operator methods without requiring an interactive window.
 Runner = type('Runner', (), {
@@ -42,6 +49,7 @@ class FakeClient:
         self.uploaded_bytes = None
 
     def upload_file(self, api_id, path):
+        self.upload_path = path
         self.upload_started.set()
         if not self.allow_upload.wait(10):
             raise RuntimeError('Test upload was not released')
@@ -103,6 +111,9 @@ class BlenderRegressions(unittest.TestCase):
         bpy.ops.object.delete(use_global=False)
         self.state = bpy.context.window_manager.atlas_workflow_state
         state_module.clear_workflow_state(self.state)
+        self.state.job_notices.clear()
+        self.state.job_history_detail_mode = False
+        self.state.job_history_index = -1
         self.runner = Runner()
         self.runner._temp_dir = ops.create_job_temp_dir()
         self.addCleanup(ops.release_job_temp_dir, self.runner._temp_dir)
@@ -140,14 +151,17 @@ class BlenderRegressions(unittest.TestCase):
         runners = [Runner(), Runner()]
         context = self.context()
         try:
-            with patch.object(ops, 'AtlasAPIClient', side_effect=clients):
+            with patch.object(ops, 'AtlasAPIClient', side_effect=clients), \
+                 patch.object(ops.preferences, 'prepare_output_copy_root',
+                              side_effect=[str(self.root / 'copies-A'), str(self.root / 'copies-B')]):
                 for index, name in enumerate(('A', 'B')):
                     self.workflow(name)
                     self.assertEqual(runners[index].execute(context), {'RUNNING_MODAL'})
                     self.assertTrue(clients[index].upload_started.wait(5))
+                    self.assertEqual(runners[index]._current_status, 'uploading')
             ops.cleanup_old_temp_dirs()
-            for runner in runners:
-                self.assertTrue((Path(runner._temp_dir) / 'input.png').is_file())
+            for client in clients:
+                self.assertTrue(Path(client.upload_path).is_file())
             # Complete B first, then A while B is still selected (same output IDs).
             for index in (1, 0):
                 clients[index].allow_upload.set()
@@ -159,8 +173,18 @@ class BlenderRegressions(unittest.TestCase):
                 outputs = {p['ParamId']: p for p in saved.OutputsSnapshot}
                 self.assertEqual(outputs['text']['StringValue'], clients[index].text)
                 self.assertEqual(Path(outputs['image']['FilePath']).read_bytes(), png.read_bytes())
+                self.assertEqual(Path(saved.OutputCopyFolder).parent.parent, self.root / f'copies-{saved.WorkflowName}')
+                self.assertEqual((Path(saved.OutputCopyFolder) / Path(outputs['image']['FilePath']).name).read_bytes(),
+                                 png.read_bytes())
                 self.assertFalse(Path(runners[index]._temp_dir).exists())
                 self.assertEqual(self.state.outputs[0].string_value, 'B result')
+                if index == 1:
+                    bpy.ops.atlas.select_job(job_id=runners[1]._job.JobId)
+            self.assertEqual(self.state.job_history[self.state.job_history_index].job_id,
+                             runners[1]._job.JobId)
+            self.assertEqual([n.job_id for n in self.state.job_notices],
+                             [runners[1]._job.JobId, runners[0]._job.JobId])
+            self.assertEqual(self.state.active_api_id, 'B')
             self.assertFalse(self.state.job_running)
             self.assertTrue(Path(self.state.outputs[1].temp_file_path).is_file())
         finally:
@@ -171,6 +195,243 @@ class BlenderRegressions(unittest.TestCase):
                     runner._thread.join(12)
                 if runner._temp_dir:
                     ops.release_job_temp_dir(runner._temp_dir)
+
+    def test_history_navigation_uses_job_id_and_preserves_workflow(self):
+        self.workflow('editing')
+        input_name = self.state.inputs[0].image_name
+        first = jobs.create_job('first', 'First run', '0.2', [])
+        second = jobs.create_job('second', 'Second run', '0.2', [])
+        self.state.filter_status = 'FAILED'
+        self.state.filter_date = 'TODAY'
+        # Force different list orders around navigation and refresh.
+        with patch.object(jobs, 'get_all_jobs', return_value=[second, first]):
+            self.assertEqual(bpy.ops.atlas.select_job(job_id=first.JobId), {'FINISHED'})
+        self.assertEqual(self.state.job_history_index, 1)
+        self.assertTrue(self.state.job_history_detail_mode)
+        self.assertTrue(self.state.job_detail_outputs_expanded)
+        self.assertEqual(self.state.filter_status, 'ALL')
+        self.assertEqual(self.state.filter_date, 'ALL')
+        self.assertEqual(self.state.filter_workflow, 'ALL')
+        with patch.object(jobs, 'get_all_jobs', return_value=[first, second]):
+            bpy.ops.atlas.refresh_job_history()
+        self.assertEqual(self.state.job_history_index, 0)
+        self.assertEqual(self.state.active_api_id, 'editing')
+        self.assertEqual(self.state.inputs[0].image_name, input_name)
+        with patch.object(jobs, 'get_all_jobs', return_value=[second]):
+            self.assertEqual(bpy.ops.atlas.select_job(job_id=first.JobId), {'CANCELLED'})
+        self.assertFalse(self.state.job_history_detail_mode)
+        self.assertEqual(self.state.job_history_index, -1)
+
+    def test_completion_notice_does_not_navigate_and_dismiss_keeps_results(self):
+        self.runner._workflow_name = 'Notice run'
+        self.runner._job = jobs.create_job('notice', 'Notice run', '0.2', [])
+        self.runner._notify_completion(self.state, failed=True)
+        self.assertFalse(self.state.job_history_detail_mode)
+        self.assertTrue(self.state.job_notices[0].failed)
+        bpy.ops.atlas.dismiss_job_notice(job_id=self.runner._job.JobId)
+        self.assertEqual(len(self.state.job_notices), 0)
+        self.assertIsNotNone(jobs.get_job(self.runner._job.JobFolderPath))
+
+    def test_running_status_never_fabricates_percentage(self):
+        self.runner._done = False
+        self.runner._start_time = 100
+        self.runner._running_job_id = 'status-test'
+        job = self.state.running_jobs.add()
+        job.job_id = 'status-test'
+        try:
+            for phase, elapsed in [('pending', 1), ('running', 13), ('downloading', 35)]:
+                self.runner._current_status = phase
+                self.runner._status_message = phase
+                with patch.object(ops.time, 'time', return_value=100 + elapsed):
+                    self.assertEqual(self.runner.modal(self.context(), SimpleNamespace(type='TIMER')),
+                                     {'RUNNING_MODAL'})
+                self.assertEqual(job.current_phase, phase)
+                self.assertEqual(job.elapsed_time, f'{elapsed:.1f}s')
+                self.assertEqual(job.progress, 0.0)
+                self.assertEqual(self.state.job_progress, 0.0)
+        finally:
+            self.runner._remove_running_job(self.state)
+
+    def test_worker_reports_submission_queue_and_download_phases(self):
+        self.runner._output_params = [ops.WorkflowOutputResult('image', 'Image', 'image')]
+        self.runner._api_origin = 'https://example.invalid'
+        self.runner._poll_interval = 0
+        phases = []
+        client = Mock()
+        def submit(*args):
+            phases.append(self.runner._current_status)
+            return 'execution'
+        def poll(*args):
+            phases.append(self.runner._current_status)
+            return ops.api_client.StatusResult(ops.ExecutionStatus.COMPLETED, outputs={'image': 'asset'})
+        def download(api_id, value, path):
+            phases.append(self.runner._current_status)
+            Path(path).write_bytes(b'fixture')
+            return path
+        client.execute_async.side_effect = submit
+        client.poll_status.side_effect = poll
+        client.download_file.side_effect = download
+        self.runner._job_thread(client, 'api', {}, [], {})
+        self.assertIsNone(self.runner._error)
+        self.assertEqual(phases, ['submitting', 'pending', 'downloading'])
+
+    def test_output_copy_path_resolution_and_validation(self):
+        prefs = SimpleNamespace(default_output_path='')
+        with patch.object(ops.preferences, 'get_preferences', return_value=prefs):
+            self.assertEqual(ops.preferences.get_output_copy_root(), '')
+            prefs.default_output_path = '//output-copies'
+            with patch.object(ops.preferences, 'bpy', SimpleNamespace(data=SimpleNamespace(filepath=''))):
+                with self.assertRaisesRegex(ValueError, 'Save the .blend'):
+                    ops.preferences.get_output_copy_root()
+            self.assertEqual(Path(ops.preferences.prepare_output_copy_root()), self.root / 'output-copies')
+            prefs.default_output_path = str(self.root / 'jobs' / 'nested')
+            with self.assertRaisesRegex(ValueError, 'outside Job History'):
+                ops.preferences.get_output_copy_root()
+            prefs.default_output_path = 'ambiguous-relative-path'
+            with self.assertRaisesRegex(ValueError, 'absolute folder'):
+                ops.preferences.get_output_copy_root()
+            prefs.default_output_path = str(self.root / 'not-a-folder')
+            Path(prefs.default_output_path).write_text('existing file')
+            with self.assertRaises(OSError):
+                ops.preferences.prepare_output_copy_root()
+
+    def test_output_copy_failure_preserves_history_and_other_items(self):
+        job = jobs.create_job('export', '..', '0.2', [], str(self.root / 'exported'))
+        files = []
+        for name in ('one.png', 'two.atlas-context.json'):
+            path = Path(job.JobFolderPath) / 'outputs' / name
+            path.write_bytes(b'original')
+            files.append({'FilePath': str(path)})
+        jobs.complete_job(job, [{'Items': files + [{'FilePath': '', 'Error': 'download failed'}]}])
+        collision = Path(job.OutputCopyFolder) / 'one.png'
+        collision.write_bytes(b'user file')
+        with self.assertRaisesRegex(OSError, 'originals are safe'):
+            jobs.export_output_copies(job)
+        self.assertEqual(collision.read_bytes(), b'user file')
+        self.assertEqual((Path(job.OutputCopyFolder) / 'two.atlas-context.json').read_bytes(), b'original')
+        self.assertTrue(all(Path(item['FilePath']).is_file() for item in files))
+        self.assertTrue(jobs.delete_job(job))
+        self.assertTrue(collision.is_file())  # History cleanup never deletes exported copies.
+
+    def test_interrupted_output_copy_removes_partial_copy(self):
+        job = jobs.create_job('interrupted', 'Interrupted', '0.2', [], str(self.root / 'interrupted-export'))
+        source = Path(job.JobFolderPath) / 'outputs' / 'image.png'
+        source.write_bytes(b'original')
+        jobs.complete_job(job, [{'FilePath': str(source)}])
+        def interrupted(src, dst):
+            dst.write(b'partial')
+            raise OSError('disk full')
+        with patch.object(jobs.shutil, 'copyfileobj', side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                jobs.export_output_copies(job)
+        self.assertFalse((Path(job.OutputCopyFolder) / source.name).exists())
+        self.assertEqual(source.read_bytes(), b'original')
+
+    def test_notification_toggles_are_independent(self):
+        prefs = SimpleNamespace(notify_on_complete=False, notify_on_error=True)
+        self.runner._job = jobs.create_job('notice-toggle', 'Notice', '0.2', [])
+        self.runner._workflow_name = 'Notice'
+        with patch.object(ops.preferences, 'get_preferences', return_value=prefs):
+            self.runner._notify_completion(self.state)
+            self.assertEqual(len(self.state.job_notices), 0)
+            self.runner._notify_completion(self.state, failed=True)
+            self.assertEqual(len(self.state.job_notices), 1)
+            self.state.job_notices.clear()
+            prefs.notify_on_complete, prefs.notify_on_error = True, False
+            self.runner._notify_completion(self.state, failed=True)
+            self.assertEqual(len(self.state.job_notices), 0)
+            self.runner._notify_completion(self.state)
+            self.assertEqual(len(self.state.job_notices), 1)
+
+    def test_verbose_logging_controls_only_atlas_and_does_not_duplicate_handlers(self):
+        prefs = SimpleNamespace(verbose_logging=False)
+        logger = logging.getLogger('atlas_workflow')
+        root_level = logging.getLogger().level
+        with patch.object(ops.preferences, 'get_preferences', return_value=prefs):
+            ops.preferences.configure_logging()
+            handler = ops.preferences._console_handler
+            stream = io.StringIO()
+            previous_stream = handler.stream
+            handler.setStream(stream)
+            try:
+                logger.debug('hidden-debug')
+                prefs.verbose_logging = True
+                ops.preferences.configure_logging()
+                ops.preferences.configure_logging()
+                logger.debug('visible-debug')
+                self.assertNotIn('hidden-debug', stream.getvalue())
+                self.assertEqual(stream.getvalue().count('visible-debug'), 1)
+                self.assertEqual(logger.handlers.count(handler), 1)
+                self.assertEqual(logging.getLogger().level, root_level)
+            finally:
+                handler.setStream(previous_stream)
+                prefs.verbose_logging = False
+                ops.preferences.configure_logging()
+
+    def test_cleanup_preserves_unfinished_jobs_and_rejects_outside_paths(self):
+        pending = jobs.create_job('keep', 'Cleanup', '0.2', [])
+        finished = jobs.create_job('remove', 'Cleanup', '0.2', [])
+        for job in (pending, finished):
+            job.CreatedAtUtc = '2000-01-01T00:00:00+00:00'
+            job.save()
+        jobs.complete_job(finished, [])
+        with patch.object(jobs, 'get_all_jobs', return_value=[pending, finished]):
+            self.assertEqual(jobs.cleanup_old_jobs(30), 1)
+        self.assertTrue(Path(pending.JobFolderPath).is_dir())
+        self.assertFalse(Path(finished.JobFolderPath).exists())
+        outsider = self.root / 'outside-history'
+        outsider.mkdir()
+        (outsider / 'job.json').write_text('{}')
+        pending.Status = jobs.JobStatus.COMPLETED
+        pending.JobFolderPath = str(outsider)
+        self.assertFalse(jobs.delete_job(pending))
+        self.assertTrue(outsider.exists())
+
+    def test_api_settings_and_storage_warning_helpers(self):
+        prefs = SimpleNamespace(request_timeout=42, no_timeout_limit=False,
+                                max_storage_mb=1, workspace_api_key=' key ', poll_interval=3,
+                                auto_import_meshes=True, auto_apply_images=False)
+        with patch.object(ops.preferences, 'get_preferences', return_value=prefs), \
+             patch.object(jobs, 'get_jobs_storage_size', return_value=(1, 2 * 1024 * 1024)), \
+             patch.dict(os.environ, {'API_KEY': 'environment-key'}):
+            self.assertEqual(ops.preferences.get_effective_timeout(), 42)
+            prefs.no_timeout_limit = True
+            self.assertIsNone(ops.preferences.get_effective_timeout())
+            prefs.no_timeout_limit, prefs.request_timeout = False, 0
+            self.assertIsNone(ops.preferences.get_effective_timeout())
+            self.assertEqual(REAL_API_KEY(), 'key')
+            prefs.workspace_api_key = ''
+            self.assertEqual(REAL_API_KEY(), 'environment-key')
+            self.assertEqual(REAL_POLL_INTERVAL(), 3)
+            self.assertTrue(REAL_STORAGE_CHECK())
+            prefs.max_storage_mb = 0
+            self.assertFalse(REAL_STORAGE_CHECK())
+            self.assertTrue(REAL_AUTO_IMPORT())
+            self.assertFalse(REAL_AUTO_APPLY())
+
+    def test_copy_failure_is_saved_and_muted_error_does_not_notify(self):
+        self.workflow('copy failure')
+        png = self.root / 'copy-fixture.png'
+        ops._save_image_as_png(self.image(), str(png))
+        client = FakeClient('preserved result', png.read_bytes())
+        client.allow_upload.set()
+        self.runner.report = Mock()
+        context = self.context()
+        with patch.object(ops, 'AtlasAPIClient', return_value=client), \
+             patch.object(ops.preferences, 'should_notify', return_value=False), \
+             patch.object(jobs, 'export_output_copies', side_effect=OSError('copy destination unavailable')):
+            self.assertEqual(self.runner.execute(context), {'RUNNING_MODAL'})
+            self.runner._thread.join(5)
+            self.assertFalse(self.runner._thread.is_alive())
+            self.runner.report.reset_mock()
+            self.assertEqual(self.runner.modal(context, SimpleNamespace(type='TIMER')), {'CANCELLED'})
+            self.runner.report.assert_not_called()
+        saved = jobs.get_job(self.runner._job.JobFolderPath)
+        self.assertEqual(saved.Status, jobs.JobStatus.FAILED)
+        self.assertIn('copy destination unavailable', saved.ErrorMessage)
+        self.assertEqual(saved.OutputsSnapshot[0]['StringValue'], 'preserved result')
+        self.assertEqual(Path(saved.OutputsSnapshot[1]['FilePath']).read_bytes(), png.read_bytes())
+        self.assertEqual(len(self.state.job_notices), 0)
 
     def test_outputs_persist_after_selection_is_cleared(self):
         self.workflow('A')
@@ -247,7 +508,7 @@ class BlenderRegressions(unittest.TestCase):
             self.assertTrue(client.upload_started.wait(5))
             runner.cancel(context)
             ops.cleanup_old_temp_dirs()
-            self.assertTrue((Path(runner._temp_dir) / 'input.png').exists())
+            self.assertTrue(Path(client.upload_path).exists())
         finally:
             client.allow_upload.set()
             if runner._thread:
@@ -292,7 +553,7 @@ class BlenderRegressions(unittest.TestCase):
     def test_relative_file_input_is_resolved_in_upload_and_snapshot(self):
         (self.root / 'relative.png').write_bytes(b'fixture')
         item = SimpleNamespace(source_type='FILE', param_type='image', file_path='//relative.png',
-                               label='Image', param_id='image', image_name='')
+                               label='Image', param_id='image', image_name='', mesh_name='')
         path = self.runner._prepare_datablock_for_upload(bpy.context, item)
         self.assertEqual(Path(path).resolve(), self.root / 'relative.png')
         snapshot = self.runner._create_inputs_snapshot(SimpleNamespace(inputs=[item]))
@@ -327,6 +588,160 @@ class BlenderRegressions(unittest.TestCase):
         self.assertIsNone(state_module._reset_library_selection())
         self.assertEqual(self.state.saved_workflows_enum, '__NONE__')
         bpy.app.timers.unregister(state_module._reset_library_selection)
+
+    def test_all_types_state_keeps_array_format_and_unknown_requiredness(self):
+        definition = ops.WorkflowDefinition.from_json_file(str(ROOT / 'examples/all-types-v02.example.json'))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        self.assertEqual((len(self.state.inputs), len(self.state.outputs)), (15, 21))
+        self.assertEqual(sum(p.is_array for p in self.state.inputs), 2)
+        self.assertTrue(all(p.required == 'UNKNOWN' for p in self.state.inputs))
+        context_output = next(p for p in self.state.outputs if p.param_type == 'agent_context')
+        self.assertEqual(context_output.file_format, 'atlas-context.json')
+
+    def test_array_payload_preserves_order_duplicates_and_primitive_values(self):
+        definition = ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='array', base_url='https://example.invalid', name='Array',
+            inputs=[dict(id='images', type='image', isArray=True, default_value=[]),
+                    dict(id='flag', type='boolean', default_value=False),
+                    dict(id='number', type='number', default_value=0),
+                    dict(id='text', type='string', default_value=''),
+                    dict(id='context', type='agent_context', required=False)], outputs=[]))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        param = self.state.inputs[0]
+        file_path = self.root / 'reference.png'
+        file_path.write_bytes(b'file fixture')
+        image = self.image()
+        fid = '11111111-1111-4111-8111-111111111111'
+        for source in ('ASSET', 'FILE', 'ASSET', 'SCENE'):
+            entry = param.asset_items.add()
+            entry.source_type, entry.asset_id = source, fid
+            entry.file_path, entry.image_name = str(file_path), image.name
+        self.state.inputs[4].provided = False
+        payload, uploads = self.runner._build_payload(bpy.context, self.state)
+        self.assertEqual(payload, dict(images=[fid, None, fid, None], flag=False, number=0, text=''))
+        self.assertEqual([p['index'] for p in uploads], [1, 3])
+        self.assertTrue(all(Path(p['path']).is_file() for p in uploads))
+        param.asset_items.clear()
+        param.required = 'REQUIRED'
+        payload, uploads = self.runner._build_payload(bpy.context, self.state)
+        self.assertEqual(payload['images'], [])  # Required means present, not nonempty.
+        self.state.inputs[4].required = 'REQUIRED'
+        with self.assertRaisesRegex(ValueError, 'required'):
+            self.runner._build_payload(bpy.context, self.state)
+
+    def test_list_edit_and_asset_reuse_operators(self):
+        definition = ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='array', base_url='https://example.invalid', name='Array',
+            inputs=[dict(id='images', type='image', isArray=True)], outputs=[]))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        records = [dict(AssetId=f'asset-{i}', ApiOrigin=self.state.base_url) for i in range(2)]
+        result = bpy.ops.atlas.reuse_asset(param_type='jpeg', asset_data=json.dumps(records), target_param='images')
+        self.assertEqual(result, {'FINISHED'})
+        items = self.state.inputs[0].asset_items
+        self.assertEqual([i.asset_id for i in items], ['asset-0', 'asset-1'])
+        bpy.ops.atlas.edit_asset_list(param_id='images', item_index=1, action='UP')
+        self.assertEqual([i.asset_id for i in items], ['asset-1', 'asset-0'])
+        bpy.ops.atlas.edit_asset_list(param_id='images', item_index=1, action='REMOVE')
+        self.assertEqual(len(items), 1)
+
+    def test_partial_array_download_keeps_files_ids_and_context(self):
+        definition = ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='array', base_url='https://example.invalid', name='Array', inputs=[],
+            outputs=[dict(id='images', type='image', isArray=True, format='png'),
+                     dict(id='meshes', type='mesh', isArray=True, format='glb'),
+                     dict(id='context', type='agent_context', format='atlas-context.json')]))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        png = self.root / 'array.png'
+        ops._save_image_as_png(self.image(), str(png))
+        outputs = dict(images=['first', dict(fid='failed'), dict(fid='first', metadata=dict(mime='image/png'))],
+                       meshes=[], context=dict(fid='context-asset'))
+        client = Mock()
+        client.execute_async.return_value = 'execution'
+        client.poll_status.return_value = ops.api_client.StatusResult(ops.ExecutionStatus.COMPLETED, outputs=outputs)
+        def download(api_id, value, path):
+            asset = ops.normalize_asset(value)
+            if asset.fid == 'failed':
+                raise IOError('fixture download failure')
+            Path(path).write_bytes(b'{"format":"atlas.agent-context","version":1,"messages":[]}'
+                                   if asset.fid == 'context-asset' else png.read_bytes())
+            return path
+        client.download_file.side_effect = download
+        runner, context = Runner(), self.context()
+        with patch.object(ops, 'AtlasAPIClient', return_value=client):
+            self.assertEqual(runner.execute(context), {'RUNNING_MODAL'})
+        runner._thread.join(5)
+        self.assertFalse(runner._thread.is_alive())
+        self.assertEqual(runner.modal(context, SimpleNamespace(type='TIMER')), {'CANCELLED'})
+        job = jobs.get_job(runner._job.JobFolderPath)
+        self.assertEqual(job.Status, jobs.JobStatus.FAILED)
+        results = {p['ParamId']: p for p in job.OutputsSnapshot}
+        items = results['images']['Items']
+        self.assertEqual([i['AssetId'] for i in items], ['first', 'failed', 'first'])
+        self.assertTrue(Path(items[0]['FilePath']).exists())
+        self.assertTrue(Path(items[2]['FilePath']).exists())
+        self.assertNotEqual(items[0]['FilePath'], items[2]['FilePath'])
+        self.assertIn('failure', items[1]['Error'])
+        self.assertEqual(results['meshes']['Items'], [])
+        self.assertTrue(results['context']['FilePath'].endswith('.atlas-context.json'))
+        self.assertEqual(results['context']['AssetId'], 'context-asset')
+
+    def test_scene_exr_preserves_hdr_values(self):
+        image = bpy.data.images.new('HDR', width=2, height=2, alpha=True, float_buffer=True)
+        image.pixels[:] = [4.0, 2.0, 0.5, 0.75] * 4
+        item = SimpleNamespace(source_type='SCENE', param_type='exr', image_name=image.name,
+                               label='HDR', param_id='hdr')
+        settings = bpy.context.scene.render.image_settings
+        settings.file_format = 'JPEG'
+        scenes_before = set(bpy.data.scenes)
+        path = self.runner._prepare_datablock_for_upload(bpy.context, item)
+        self.assertEqual(settings.file_format, 'JPEG')
+        self.assertEqual(set(bpy.data.scenes), scenes_before)
+        self.assertEqual(Path(path).suffix, '.exr')
+        loaded = bpy.data.images.load(path)
+        self.assertTrue(loaded.is_float)
+        for actual, expected in zip(loaded.pixels, image.pixels):
+            self.assertAlmostEqual(actual, expected, delta=0.002)
+
+    def test_mesh_array_exports_independent_objects(self):
+        cube, sphere, _ = self.mesh_objects()
+        definition = ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='array', base_url='https://example.invalid', name='Meshes',
+            inputs=[dict(id='meshes', type='mesh', isArray=True)], outputs=[]))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        for obj in (sphere, cube):
+            entry = self.state.inputs[0].asset_items.add()
+            entry.source_type, entry.mesh_name = 'SCENE', obj.name
+        payload, uploads = self.runner._build_payload(bpy.context, self.state)
+        self.assertEqual(payload['meshes'], [None, None])
+        for upload, obj in zip(uploads, (sphere, cube)):
+            raw = Path(upload['path']).read_bytes()
+            length = struct.unpack_from('<I', raw, 12)[0]
+            gltf = json.loads(raw[20:20 + length])
+            self.assertEqual([n['name'] for n in gltf['nodes']], [obj.name])
+        self.assertEqual(list(bpy.context.selected_objects), [cube])
+
+        previous = set(bpy.context.scene.objects)
+        paths = [u['path'] for u in uploads]
+        self.assertEqual(bpy.ops.atlas.import_mesh_list(paths_json=json.dumps(paths)), {'FINISHED'})
+        created = set(bpy.context.scene.objects) - previous
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len({obj.users_collection[0] for obj in created}), 2)
+        self.assertTrue(all(len(obj.users_collection) == 1 for obj in created))
+
+    def test_raster_formats_load_through_result_pipeline(self):
+        formats = [('jpeg', 'JPEG', 'jpg'), ('webp', 'WEBP', 'webp'),
+                   ('tga', 'TARGA', 'tga'), ('tiff', 'TIFF', 'tiff')]
+        if bpy.app.version >= (5, 1, 0):
+            formats.append(('avif', 'AVIF', 'avif'))
+        image = self.image()
+        for wire_type, encoding, extension in formats:
+            with self.subTest(wire_type=wire_type):
+                path = str(self.root / f'encoded.{extension}')
+                ops._save_image_as_png(image, path, encoding)
+                output = ops.WorkflowOutputResult(param_id='result', label='Raster', param_type=wire_type)
+                self.runner._output_params = [output]
+                self.runner._import_plan = [dict(param_id='result', type=wire_type.upper(), path=path)]
+                self.runner._process_import_plan(bpy.context)
+                self.assertTrue(output.image_name)
+                loaded = bpy.data.images[output.image_name]
+                self.assertEqual(tuple(loaded.size), (2, 2))
+                self.assertIsNotNone(loaded.packed_file)
 
 
 if __name__ == '__main__':

@@ -14,16 +14,21 @@ parameter type, keeping the panel classes clean and focused.
 """
 
 import os
+import json
 import bpy
 from datetime import datetime, timezone, timedelta
 try:
     from . import custom_icons
     from . import workflow_manager
     from . import job_manager
+    from . import native_assets
+    from .asset_types import FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES
 except ImportError:
     import custom_icons
     import workflow_manager
     import job_manager
+    import native_assets
+    from asset_types import FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES
 
 
 def draw_collapsible_box(layout, state, prop_name: str, label: str, icon: str):
@@ -125,24 +130,17 @@ class ATLAS_PT_RunningJobsPanel(bpy.types.Panel):
         row1.label(text=job.workflow_name or "Workflow")
         row1.label(text=job.elapsed_time)
         
-        # Row 2: Progress bar + percentage + short status
+        # Atlas does not report a completion percentage. Show activity honestly.
         row2 = box.row(align=True)
-        row2.prop(job, "progress", text="", slider=True)
-        progress_pct = int(job.progress * 100)
-        
-        # Short status text
-        if phase == "pending":
-            status_text = "Queued"
-        elif phase == "uploading":
-            status_text = "Uploading"
-        elif phase == "downloading":
-            status_text = "Downloading"
-        elif phase == "running":
-            status_text = "Running"
-        else:
-            status_text = f"{progress_pct}%"
-        
-        row2.label(text=status_text)
+        status_text = {
+            'initializing': 'Starting', 'submitting': 'Submitting',
+            'pending': 'Queued', 'uploading': 'Uploading',
+            'downloading': 'Downloading', 'running': 'Running',
+            'completed': 'Saving results', 'failed': 'Finishing',
+        }.get(phase, 'Working')
+        row2.label(text=status_text, icon='TIME')
+        op = box.operator("atlas.select_job", text="View in Job History", icon='FORWARD')
+        op.job_id = job.job_id
 
 
 class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
@@ -190,6 +188,14 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
             if state.is_active_workflow_savable:
                 layout.operator("atlas.save_active_workflow", text="Save to Library", icon='ADD')
 
+        for notice in reversed(state.job_notices):
+            box = layout.box()
+            row = box.row(align=True)
+            row.label(text=f"{notice.workflow_name} · {'Needs attention' if notice.failed else 'Completed'}",
+                      icon='ERROR' if notice.failed else 'CHECKMARK')
+            row.operator("atlas.dismiss_job_notice", text="", icon='X').job_id = notice.job_id
+            box.operator("atlas.select_job", text="View Results", icon='FORWARD').job_id = notice.job_id
+
 
 class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
     """
@@ -201,7 +207,7 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Atlas"
-    bl_order = 2  # Appears below running jobs panel
+    bl_order = 3  # History links open results above the workflow's input controls.
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -213,13 +219,6 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
 
-        if state.job_history_detail_mode and state.job_history_index >= 0:
-            compact_box = layout.box()
-            row = compact_box.row(align=True)
-            row.label(text=state.active_name or "Workflow", icon='FILE_TICK')
-            row.operator("atlas.run_workflow", text="", icon='PLAY')
-            return
-
         # --- INPUTS SECTION ---
         if state.inputs:
             inputs_box, expanded = draw_collapsible_box(
@@ -229,21 +228,23 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
                 for item in state.inputs:
                     draw_input_param(context, inputs_box, item)
         
-        # --- OUTPUTS SECTION (Preview only - disabled) ---
+        # --- EXPECTED OUTPUTS (schema labels, not result controls) ---
         if state.outputs:
             outputs_box, expanded = draw_collapsible_box(
-                layout, state, "selected_outputs_expanded", f"Outputs ({len(state.outputs)})", 'EXPORT'
+                layout, state, "selected_outputs_expanded", f"Expected Outputs ({len(state.outputs)})", 'INFO'
             )
+            outputs_box.label(text="Results from each run appear", icon='INFO')
+            outputs_box.label(text="in Job History.")
             if expanded:
-                # Draw outputs as disabled preview (just name + type icon)
+                # Plain labels describe the contract even before a run exists.
                 col = outputs_box.column(align=True)
-                col.enabled = False  # Disable entire section
                 
                 for item in state.outputs:
                     row = col.row(align=True)
                     icon_id = custom_icons.get_icon_id(item.param_type)
                     row.label(text="", icon_value=icon_id)
-                    row.label(text=item.label)
+                    row.label(text=item.label + (' []' if item.is_array else ''))
+                    row.label(text=item.file_format or item.param_type)
 
         # --- RUN BUTTON ---
         layout.separator()
@@ -280,9 +281,9 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
             # Time display (compact)
             row.label(text=item.created_at_display)
             
-            # View details button (small arrow icon)
-            op = row.operator("atlas.select_job", text="", icon='FORWARD', emboss=False)
-            op.job_index = index
+            op = row.operator("atlas.select_job", text="View Results" if item.status in (2, 3) else "View Job",
+                              icon='FORWARD')
+            op.job_id = item.job_id
             
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
@@ -338,11 +339,11 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
     - Detail View: Shows full details of selected job
     """
     bl_idname = "ATLAS_PT_job_history_panel"
-    bl_label = "Jobs History"
+    bl_label = "Job History"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Atlas"
-    bl_order = 4
+    bl_order = 2
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -356,7 +357,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
     def draw(self, context: bpy.types.Context):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
-        
+
         # Auto-load job history if empty (first time panel is opened)
         if len(state.job_history) == 0 and not ATLAS_PT_JobHistoryPanel._auto_load_scheduled:
             ATLAS_PT_JobHistoryPanel._auto_load_scheduled = True
@@ -423,13 +424,23 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         elif selected_job.status == 3:  # Failed
             header_row.label(text="", icon='ERROR')
             status_text = "Failed"
+        elif selected_job.status == 0:
+            header_row.label(text="", icon='PAUSE')
+            status_text = "Queued"
         else:
             header_row.label(text="", icon='TIME')
             status_text = "Running"
+        running_job = next((job for job in state.running_jobs
+                            if job.job_id == selected_job.job_id), None)
+        if running_job:
+            status_text = f"{running_job.status} · {running_job.elapsed_time}"
         
         header_col = header_row.column()
         header_col.label(text=selected_job.workflow_name)
         header_col.label(text=f"{selected_job.created_at_display} • {status_text}")
+        if full_job.OutputCopyFolder:
+            layout.operator('atlas.open_job_folder', text='Open Output Copies',
+                            icon='FILE_FOLDER').job_folder_path = full_job.OutputCopyFolder
         
         # === ERROR INFO (if failed) ===
         if full_job.Status == 3 and full_job.ErrorMessage:
@@ -491,7 +502,20 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         row.label(text=label)
         
         # Value display (all disabled since this is historical data)
-        if param_type == 'boolean':
+        if not param.get('Provided', True):
+            row.label(text='Omitted (server default if allowed)')
+        elif param_type in FILE_FORMATS:
+            records = param.get('Items', []) if param.get('IsArray') else [param]
+            if param.get('IsArray'):
+                row.label(text=f'{len(records)} assets')
+            for index, record in enumerate(records):
+                value = (record.get('AssetId') or os.path.basename(record.get('FilePath') or '')
+                         or record.get('ImageValue') or record.get('MeshValue') or record.get('SceneValue') or '(no asset)')
+                if record.get('FrameStart') is not None:
+                    value += f" (frames {record['FrameStart']}–{record['FrameEnd']})"
+                target = layout.row() if param.get('IsArray') else row
+                target.label(text=f'{index + 1}. {value}' if param.get('IsArray') else value)
+        elif param_type == 'boolean':
             value = "✓ Yes" if param.get('BoolValue', False) else "✗ No"
             row.label(text=value)
         elif param_type == 'number':
@@ -502,80 +526,51 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             if value and len(value) > 25:
                 value = value[:22] + "..."
             row.label(text=value or "(empty)")
-        elif param_type in ('image', 'mesh'):
-            file_path = param.get('FilePath', '')
-            if file_path:
-                filename = os.path.basename(file_path)
-                row.label(text=filename)
-            else:
-                row.label(text="(no file)")
+        else:
+            row.label(text=f'Unsupported type: {param_type}')
     
     def _draw_output_param(self, layout, param, job_folder):
-        """Draw a single output parameter with appropriate actions."""
         param_type = param.get('ParamType', 'string')
-        param_id = param.get('ParamId', 'unknown')
-        label = param.get('Label', param_id)
-        
+        label = param.get('Label') or param.get('ParamId', 'Output')
+        if param_type in FILE_FORMATS:
+            records = param.get('Items') or ([] if param.get('IsArray') else [{
+                'FilePath': param.get('FilePath'), 'AssetId': param.get('AssetId', ''),
+                'ApiOrigin': param.get('ApiOrigin', ''), 'Index': 0,
+            }])
+            box = layout.box()
+            box.label(text=f"{label} ({len(records)})" if param.get('IsArray') else label)
+            for record in records:
+                draw_asset_result(box, param_type, record)
+            if param.get('IsArray') and records:
+                reusable = [r for r in records if r.get('AssetId')]
+                if reusable:
+                    op = box.operator('atlas.reuse_asset', text='Use All as Input', icon='FORWARD')
+                    op.param_type = param_type
+                    op.asset_data = json.dumps(reusable)
+                paths = [r['FilePath'] for r in records if r.get('FilePath') and os.path.isfile(r['FilePath'])]
+                if param_type == 'mesh' and paths:
+                    op = box.operator('atlas.import_mesh_list', text='Import All Meshes', icon='IMPORT')
+                    op.paths_json = json.dumps(paths)
+            if not records:
+                box.label(text='Empty list' if param.get('IsArray') else 'No asset returned')
+            return
         row = layout.row(align=True)
-        
-        # Type icon
-        icon_id = custom_icons.get_icon_id(param_type)
-        row.label(text="", icon_value=icon_id)
         row.label(text=label)
-        
-        # Value display + actions based on type
         if param_type == 'boolean':
-            # Bool: Just display value (no action makes sense)
-            value = "✓ Yes" if param.get('BoolValue', False) else "✗ No"
-            row.label(text=value)
-            
-        elif param_type == 'number':
-            # Number: Display + copy button
-            value = param.get('NumberValue', 0.0)
-            value_str = f"{value:.4f}" if isinstance(value, float) else str(value)
-            row.label(text=value_str)
-            op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
-            op.value = value_str
-            
+            row.label(text='Yes' if param.get('BoolValue') else 'No')
+            return
+        if param_type == 'number':
+            value = str(param.get('NumberValue', 0))
         elif param_type == 'string':
-            # String: Keep the history compact; open full content in a dialog.
-            value = param.get('StringValue', '')
-            preview = value[:32] + "..." if len(value) > 32 else value
-            row.label(text=preview or "(empty)")
-            if value:
-                op_view = row.operator("atlas.view_text_output", text="", icon='TEXT')
-                op_view.title = label
-                op_view.value = value
-                op = row.operator("atlas.copy_to_clipboard", text="", icon='COPYDOWN')
-                op.value = value
-                
-        elif param_type == 'image':
-            # Image: filename + View/Apply buttons
-            file_path = param.get('FilePath', '')
-            if file_path and os.path.exists(file_path):
-                filename = os.path.basename(file_path)
-                row.label(text=filename)
-                
-                op_view = row.operator("atlas.view_job_output_image", text="", icon='IMAGE_DATA')
-                op_view.file_path = file_path
-                
-                op_apply = row.operator("atlas.apply_job_output_image", text="", icon='TEXTURE')
-                op_apply.file_path = file_path
-            else:
-                row.label(text="(file not found)")
-                
-        elif param_type == 'mesh':
-            # Mesh: filename + Import button
-            file_path = param.get('FilePath', '')
-            if file_path and os.path.exists(file_path):
-                filename = os.path.basename(file_path)
-                row.label(text=filename)
-                
-                op_import = row.operator("atlas.import_job_output_mesh", text="", icon='IMPORT')
-                op_import.file_path = file_path
-            else:
-                row.label(text="(file not found)")
-    
+            value = param.get('StringValue') or ''
+        else:
+            value = json.dumps(param.get('RawValue'), ensure_ascii=False)
+        row.label(text=value[:32] + ('...' if len(value) > 32 else ''))
+        op = row.operator('atlas.view_text_output', text='', icon='TEXT')
+        op.title, op.value = label, value
+        op = row.operator('atlas.copy_to_clipboard', text='', icon='COPYDOWN')
+        op.value = value
+
     def _wrap_text(self, text, max_chars):
         """Wrap text into lines of max_chars length."""
         words = text.split()
@@ -607,68 +602,124 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
 # --- Parameter Drawing Helper Functions (Unchanged) ---
 # -------------------------------------------------------------------
 
-def draw_input_param(context: bpy.types.Context, layout: bpy.types.UILayout, item: bpy.types.PropertyGroup):
-    """Draws the appropriate UI widget for a single input parameter."""
-    ptype = item.param_type
-    icon_id = custom_icons.get_icon_id(ptype)  # <-- Get icon from our new module
-
-    if ptype == "image" or ptype == "mesh":
-        row = layout.row(align=True)
-        # Use icon_value for custom icons
-        row.label(text="", icon_value=icon_id)
-        row.label(text=item.label)
-
-        box = layout.box()
-        # (Rest of this block is unchanged)
-        box.row().prop(item, "source_type", expand=True)
-        if item.source_type == 'SCENE':
-            if ptype == "image":
-                box.prop_search(item, "image_name", bpy.data, "images", text="")
-            elif ptype == "mesh":
-                box.prop_search(item, "mesh_name", context.scene, "objects", text="")
-        elif item.source_type == 'FILE':
-            # 1. Draw standard Blender file picker
-            box.prop(item, "file_path", text="")
-
-            # 2. POST-SELECTION VALIDATION (The "Filter")
-            # If the user picks a file, we check the extension immediately.
-            path = item.file_path.lower()
-            if path:
-                import os
-                valid = True
-                ext = os.path.splitext(path)[1]
-
-                # Check Image
-                if ptype == "image" and ext not in ['.png', '.jpg', '.jpeg', '.webp']:
-                    valid = False
-                    msg = "Selected file is not an image!"
-
-                # Check Mesh
-                elif ptype == "mesh" and ext not in ['.glb', '.gltf']:
-                    valid = False
-                    msg = "Selected file is not a GLB/GLTF mesh!"
-
-                # Draw Warning if invalid
-                if not valid:
-                    row = box.row()
-                    row.alert = True  # Makes the text red
-                    row.label(text=msg, icon='ERROR')
-
-        return
-
-
-    # For simple types
+def draw_asset_result(layout, param_type, record):
+    path = record.get('FilePath') or ''
     row = layout.row(align=True)
-    row.label(text="", icon_value=icon_id)
-    row.label(text=item.label)
-    if ptype == "boolean":
-        row.prop(item, "bool_value", text="")
-    elif ptype == "number":
-        row.prop(item, "number_value", text="")
-    elif ptype == "string":
-        row.prop(item, "string_value", text="")
+    row.label(text=f"{record.get('Index', 0) + 1}. {os.path.basename(path) or record.get('Filename') or 'Asset'}")
+    if path and os.path.isfile(path):
+        # AVIF was added after our oldest supported Blender versions.
+        can_preview = not path.lower().endswith('.avif') or bpy.app.version >= (5, 1, 0)
+        if param_type in RASTER_TYPES and can_preview:
+            for operator, text in [('atlas.view_job_output_image', 'View'), ('atlas.apply_job_output_image', 'Apply')]:
+                op = row.operator(operator, text=text)
+                op.file_path = path
+        elif param_type == 'mesh' and path.lower().endswith(('.glb', '.gltf')):
+            op = row.operator('atlas.import_job_output_mesh', text='Import', icon='IMPORT')
+            op.file_path = path
+        elif param_type == 'scene':
+            op = row.operator('atlas.append_scene_collection', text='Append Collection')
+            op.file_path = path
+            op = layout.operator('atlas.open_scene_separately', text='Open in New Blender')
+            op.file_path = path
+        elif param_type in ('usdz', 'rig_animation', 'svg'):
+            importer = {'usdz': 'wm.usd_import', 'rig_animation': 'import_scene.gltf', 'svg': 'import_curve.svg'}[param_type]
+            if native_assets.operator_available(importer):
+                op = row.operator('atlas.import_native_asset', text='Import Curves' if param_type == 'svg' else 'Import')
+                op.file_path, op.asset_type = path, param_type
+            else:
+                layout.label(text='Native importer unavailable; use the downloaded file.', icon='INFO')
+        elif param_type in ('audio', 'video'):
+            op = row.operator('atlas.add_media', text='Add to Sequencer')
+            op.file_path, op.asset_type = path, param_type
+        elif param_type == 'agent_context':
+            op = row.operator('atlas.view_context', text='View Context')
+            op.file_path = path
+        op = row.operator('atlas.open_job_folder', text='', icon='FILE_FOLDER')
+        op.job_folder_path = os.path.dirname(path)
+        if param_type in RASTER_TYPES and not can_preview:
+            layout.label(text='AVIF preview requires Blender 5.1+. File is available in the job folder.', icon='INFO')
+    if record.get('AssetId'):
+        op = row.operator('atlas.reuse_asset', text='Use as Input', icon='FORWARD')
+        op.param_type = param_type
+        op.asset_data = json.dumps([record])
+        op = row.operator('atlas.copy_to_clipboard', text='', icon='COPYDOWN')
+        op.value = record['AssetId']
+    if record.get('Error'):
+        layout.label(text=record['Error'][:100], icon='ERROR')
+
+
+def draw_asset_input(context, layout, param, entry, index=-1, show_source=True):
+    if show_source:
+        layout.prop(entry, 'source_type', text='Source')
+    if entry.source_type == 'FILE':
+        row = layout.row(align=True)
+        row.prop(entry, 'file_path', text='')
+        op = row.operator('atlas.pick_input_file', text='', icon='FILE_FOLDER')
+        op.param_id, op.file_type, op.item_index = param.param_id, param.param_type, index
+    elif entry.source_type == 'ASSET':
+        layout.prop(entry, 'asset_id', text='Asset ID')
+    elif param.param_type in ('image', 'exr'):
+        layout.prop_search(entry, 'image_name', bpy.data, 'images', text='Image')
+    elif param.param_type == 'mesh':
+        layout.prop_search(entry, 'mesh_name', context.scene, 'objects', text='Object')
+    elif param.param_type == 'scene':
+        layout.label(text='Snapshot current scene with packed dependencies.')
+        layout.label(text='Linked libraries and unpacked caches/media must be resolved first.')
+    elif param.param_type in ('usdz', 'rig_animation'):
+        layout.prop_search(entry, 'mesh_name', context.scene, 'objects', text='Armature' if param.param_type == 'rig_animation' else 'Root Object')
+        if param.param_type == 'usdz':
+            layout.label(text='Exports root object and descendants with textures.')
+        else:
+            layout.label(text='Exports active action and bound meshes.')
+            row = layout.row(align=True)
+            row.prop(entry, 'frame_start')
+            row.prop(entry, 'frame_end')
     else:
-        row.label(text=f"(Unsupported type: {ptype})")
+        layout.label(text='Choose File or Existing Asset for this type.', icon='INFO')
+
+
+def draw_input_param(context, layout, item):
+    box = layout.box()
+    row = box.row(align=True)
+    row.prop(item, 'provided', text='')
+    suffix = ' *' if item.required == 'REQUIRED' else ''
+    row.label(text=item.label + (' []' if item.is_array else '') + suffix)
+    if not item.provided:
+        box.label(text='Omitted; Atlas checks requirements and optional defaults.', icon='INFO')
+        return
+    if item.param_type in FILE_FORMATS:
+        if item.is_array:
+            for index, entry in enumerate(item.asset_items):
+                sub = box.box()
+                controls = sub.row(align=True)
+                index_label = controls.row(align=True)
+                index_label.alignment = 'LEFT'
+                index_label.label(text=str(index + 1))
+                controls.prop(entry, 'source_type', text='')
+                actions = controls.row(align=True)
+                actions.alignment = 'RIGHT'
+                for action, icon in [('UP', 'TRIA_UP'), ('DOWN', 'TRIA_DOWN'), ('REMOVE', 'X')]:
+                    button = actions.row(align=True)
+                    button.enabled = not ((action == 'UP' and index == 0) or
+                                          (action == 'DOWN' and index == len(item.asset_items) - 1))
+                    op = button.operator('atlas.edit_asset_list', text='', icon=icon)
+                    op.param_id, op.item_index, op.action = item.param_id, index, action
+                draw_asset_input(context, sub, item, entry, index, show_source=False)
+            row = box.row(align=True)
+            op = row.operator('atlas.edit_asset_list', text='Add Item', icon='ADD')
+            op.param_id = item.param_id
+            op = row.operator('atlas.pick_input_file', text='Add Files', icon='FILE_FOLDER')
+            op.param_id, op.file_type = item.param_id, item.param_type
+            if not item.asset_items:
+                box.label(text='Empty list')
+        else:
+            draw_asset_input(context, box, item, item)
+    elif item.param_type in PRIMITIVE_TYPES and not item.is_array:
+        prop = {'boolean': 'bool_value', 'number': 'number_value', 'string': 'string_value'}[item.param_type]
+        box.prop(item, prop, text='')
+    else:
+        box.label(text=f'Unsupported input type: {item.param_type}', icon='ERROR')
+        box.label(text='Omit only if this workflow allows it.')
 
 
 def draw_output_param(context: bpy.types.Context, layout: bpy.types.UILayout, item: bpy.types.PropertyGroup):

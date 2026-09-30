@@ -15,15 +15,31 @@ class ParamType(str, Enum):
     STRING = "string"
     IMAGE = "image"
     MESH = "mesh"
+    AUDIO = "audio"
+    VIDEO = "video"
+    SCENE = "scene"
+    USDZ = "usdz"
+    EXR = "exr"
+    ANIMATION = "rig_animation"
+    CONTEXT = "agent_context"
+    PDF = "pdf"
+    SVG = "svg"
+    JPEG = "jpeg"
+    WEBP = "webp"
+    TGA = "tga"
+    TIFF = "tiff"
+    AVIF = "avif"
 
     @staticmethod
-    def from_str(value: str) -> "ParamType":
-        """Map raw JSON type strings to ParamType, with validation."""
+    def from_str(value: str) -> "ParamType | str":
+        """Keep unknown wire types visible without guessing their behavior."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('Parameter type must be a nonempty string')
         value = value.lower()
         try:
             return ParamType(value)
         except ValueError:
-            raise ValueError(f"Unsupported parameter type: {value!r}")
+            return value
 
 
 # ---------------------------------------------------------------------------
@@ -33,9 +49,12 @@ class ParamType(str, Enum):
 @dataclass
 class InputParamDef:
     id: str
-    type: ParamType
+    type: ParamType | str
     label: str
     default_value: Any = None
+    is_array: bool = False
+    required: Optional[bool] = None
+    has_default: bool = False
 
     # Future extensions:
     # min_value: Optional[float] = None
@@ -47,8 +66,9 @@ class InputParamDef:
 @dataclass
 class OutputParamDef:
     id: str
-    type: ParamType
+    type: ParamType | str
     format: Optional[str] = None  # e.g. "png", "glb"
+    is_array: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +115,17 @@ class WorkflowDefinition:
 
         # Inputs
         raw_inputs = data.get("inputs", [])
+        for side in ('inputs', 'outputs'):
+            seen = set()
+            for item in data.get(side, []):
+                pid = item.get('id')
+                if not isinstance(pid, str) or not pid or pid in seen:
+                    raise ValueError(f'Invalid or duplicate {side} parameter ID: {pid!r}')
+                seen.add(pid)
+                if type(item.get('isArray', False)) is not bool:
+                    raise ValueError(f'{pid}: isArray must be boolean')
+                if 'required' in item and type(item['required']) is not bool:
+                    raise ValueError(f'{pid}: required must be boolean')
         inputs: List[InputParamDef] = []
         for idx, item in enumerate(raw_inputs):
             try:
@@ -113,6 +144,9 @@ class WorkflowDefinition:
                     type=ptype,
                     label=label,
                     default_value=default,
+                    is_array=item.get('isArray', False),
+                    required=item.get('required'),
+                    has_default='default_value' in item,
                 )
             )
 
@@ -134,6 +168,7 @@ class WorkflowDefinition:
                     id=pid,
                     type=ptype,
                     format=fmt,
+                    is_array=item.get('isArray', False),
                 )
             )
 

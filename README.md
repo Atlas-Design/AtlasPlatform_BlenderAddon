@@ -38,9 +38,10 @@ The addon lives in Blender's 3D View sidebar under the **Atlas** tab. It handles
 ## What you can do
 
 - **Run an Atlas workflow** from **3D View Sidebar (`N`) > Atlas**.
-- **Use Blender scene data or files** for image and mesh inputs.
+- **Use Blender scene data, files, or existing asset IDs** for image and mesh inputs, including ordered lists.
+- **Transfer all file types in the all-types export**, including scenes, USDZ, animation, audio, video, PDF, SVG, and agent context.
 - **Set primitive inputs** such as text prompts, numbers, and booleans.
-- **Watch progress** while the job runs without freezing Blender.
+- **Watch execution status and elapsed time** while the job runs without freezing Blender.
 - **Review outputs later** in **Jobs History**.
 - **Bring results into the scene** by importing generated meshes, previewing generated images on planes, applying generated images as materials, and copying generated text.
 - **Atlas Platform API v0.2** support with workspace API key auth, async polling, and version-aware upload/download URLs.
@@ -59,8 +60,8 @@ This is the main panel for one workflow at a time: pick what to run, fill in inp
 | --- | --- |
 | **Atlas Workflow Library** | Load a workflow JSON, switch between saved workflows, save the active workflow to the local library, or remove a local workflow. |
 | **Selected Workflow** | Shows the current workflow. Inputs are expanded by default; output preview is collapsed until you need it. |
-| **Inputs** | Type-aware fields for image, mesh, number, boolean, and text values. Image and mesh inputs can come from the scene or from files. |
-| **Outputs** | Preview of what the workflow will return. Results appear in job history after a successful run. |
+| **Inputs** | Text, number and boolean controls; file or asset-ID inputs; ordered asset lists. Images, EXR and meshes also accept Blender data. |
+| **Expected Outputs** | Names and types the workflow can return. View actual results for each run in Job History. |
 | **Run button** | Starts the selected workflow with the current inputs. The button label includes the workflow name. |
 
 <p align="center">
@@ -88,21 +89,31 @@ This is the main panel for one workflow at a time: pick what to run, fill in inp
 3. Select scene objects or files for image and mesh inputs.
 4. Fill in text, number, and boolean inputs.
 5. Click **Run [Workflow Name]**.
-6. Review the completed run in **Jobs History**.
+6. Click **View Results** on the completion notice or the job's history row.
+
+Every running job has a **View in Job History** button. It selects that exact run,
+even after you switch workflows. Expand Job History's standard Blender header
+if the panel is collapsed. Completion notices stay in the library panel
+until dismissed (up to five recent notices per session); dismissing a notice keeps
+the job and results. Finishing another run does not change the job you are viewing.
 
 <p align="center">
   <img src="images/Workflow_Running.png" alt="Running job progress in the Atlas sidebar" width="453"/>
   <br/>
-  <em>Running Jobs shows current execution status and progress.</em>
+  <em>Earlier UI shown. Running Jobs now shows execution phase and elapsed time without a percentage bar.</em>
 </p>
 
 ---
 
 ## Jobs History
 
-**Location:** **3D View Sidebar (`N`) > Atlas > Jobs History**.
+**Location:** **3D View Sidebar (`N`) > Atlas > Job History**.
 
-Jobs History is where you review current and past workflow runs. The history panel has a compact list view and a detail view for the selected job.
+Job History is where you review current and past workflow runs. Its default position
+is above Selected Workflow, and you can reorder it using Blender's standard panel
+header. It has a compact list view and a detail view. Per-run links clear list
+filters and select that job's outputs; expand the panel if collapsed. Workflow inputs remain
+available; completion never opens or switches history automatically.
 
 | Area | What it is for |
 | --- | --- |
@@ -130,6 +141,9 @@ Jobs History is where you review current and past workflow runs. The history pan
 - **Mesh > Import** imports the generated GLB into the scene.
 - **Text > View** opens the full generated text in a dialog.
 - **Copy** actions copy text or primitive values to the clipboard.
+- **Use as Input** sends an output's asset ID to a compatible input of the selected workflow, without downloading and uploading it again. For arrays, **Use All as Input** appends the IDs in order.
+- **Array outputs** offer actions for each item. **Import All Meshes** imports each asset into its own collection. Arrays stay on disk until explicitly opened; scalar auto-import preferences do not load entire arrays.
+- **Other file outputs** remain available in the job folder, with asset IDs and metadata in history. If one download fails, successful files are retained and the failed item is identified.
 
 <p align="center">
   <img src="images/Image_Output_Actions.png" alt="Image output actions and preview plane in Blender" width="409"/>
@@ -236,12 +250,27 @@ Open **Edit > Preferences > Add-ons > Atlas Workflow Integration**.
 | **Workspace API Key** | Empty | Bearer token for Atlas Platform (`atk_...`). Required for API v0.2+ workflows. |
 | **Request Timeout** | 300 seconds | Per-request HTTP timeout. Set to `0` or enable no limit for long requests. |
 | **Poll Interval** | 2 seconds | How often the addon checks async job status. |
-| **Default Output Path** | Empty | Empty means outputs stay in each job history folder. |
-| **Auto-Import Meshes** | Off | Automatically import mesh outputs after a successful run. |
-| **Auto-Apply Images** | Off | Automatically apply image outputs to the active object. |
-| **Max Storage** | 500 MB | Warning threshold for local job history storage. |
-| **Notifications** | On | Blender reports when jobs complete or fail. |
+| **Output Copy Folder** | Empty | Optional extra file copies in a unique folder per run. Job History always retains originals. The effective destination is shown below the field. |
+| **Auto-Import Meshes** | Off | Import single mesh outputs into the current scene; arrays stay manual. |
+| **Auto-Apply Images** | Off | Apply single raster outputs to the object active at completion; arrays stay manual. |
+| **Storage Warning** | 500 MB | Warning threshold for local job history storage, not a hard cap. `0` disables it. |
+| **Warn** | On | Report an exceeded storage threshold when starting a run. |
+| **Manual Cleanup Age** | 0 | Starting age for the Clean Old Jobs dialog; `0` uses 30 days. Nothing is deleted automatically. |
+| **Notifications** | On | Independently enable completion/error reports and sidebar notices. Validation errors and job history remain available when muted. |
 | **Verbose Logging** | Off | Extra console output for troubleshooting. |
+
+The former **Default Output Path** setting is now **Output Copy Folder**. A custom
+folder is captured when the run starts, so changing it affects subsequent runs.
+Copies use `<folder>/<workflow>/<timestamp>_<job-id>/`; **Open Output Copies** in
+the job details opens that location. Blank means no extra copies. `//` paths are
+relative to a saved `.blend`. Invalid/unwritable destinations fail before the API
+run; later copy failures are recorded while the original results stay in history.
+Existing files are never overwritten by the copy step. Primitive values stay in
+`job.json`; the optional folder receives file outputs only.
+
+**Clean Old Jobs** and **Clear Finished Jobs** delete finished history records
+and their stored files after confirmation. They preserve queued/running jobs and
+exported copies. Storage usage counts Job History, not the extra copies.
 
 Keys are sent as `Authorization: Bearer <key>` on upload, execute, status, and download requests.
 
@@ -262,6 +291,37 @@ Supported types:
 | `string` | Text field | Shows preview, full-text dialog, and copy action. |
 | `image` | Scene image or local image file | Downloads image output, supports View and Apply. |
 | `mesh` | Scene object or local GLB/GLTF file | Downloads GLB output and supports Import. |
+| `jpeg`, `webp`, `tga`, `tiff`, `avif` | File or asset ID | Retains encoding; supports raster View and Apply. AVIF actions require Blender 5.1+. |
+| `exr` | Blender image, file or asset ID | Single-layer Blender image export preserves linear float values and alpha; downloaded images support View and Apply. Multilayer EXR is supported as unchanged file transfer. |
+| `scene` | Current scene snapshot, file or asset ID | Append a chosen collection or open the result in a separate Blender process. |
+| `usdz` | Root object and descendants, file or asset ID | Import with textures extracted beside the result in durable job storage. |
+| `rig_animation` | Armature with active action and frame range, file or asset ID | Export bound meshes and skinning; import returned GLB rigs and clips. |
+| `audio`, `video` | File or asset ID | Add to the Sequencer with an explicit frame and channel. |
+| `svg` | File or asset ID | Import path geometry as curves when the SVG importer is available. |
+| `agent_context` | File or asset ID | Read-only, paginated JSON view; linked attachments stay references. |
+| `pdf` | File or asset ID | Save, reveal and reuse the asset. |
+
+Every file input accepts an **Existing Asset** UUID. `agent_context` is a stored file asset: provide its UUID or upload its file, never inline conversation JSON. File outputs accept objects containing `fid`, a download URL and metadata; legacy UUID responses also work. The plugin sends only UUIDs when chaining results.
+
+Inputs marked `isArray` expose **Add Item**, **Add Files**, remove and reorder controls. Image and mesh lists can mix Blender data, files and existing asset IDs; each mesh row exports a separate GLB. Empty lists and duplicate IDs retain their meaning.
+
+The **Provide value** checkbox controls omission. Disabling it leaves the field out of the request; Atlas applies optional defaults or returns a required-input error. Explicit per-input `required` flags are respected. When the workflow export omits that metadata, the plugin leaves validation to Atlas. No OpenAPI file is needed.
+
+Downloads preserve the returned format and stream to disk. Workspace credentials are restricted to the configured API origin; foreign download URLs use the canonical asset-ID endpoint, and cross-origin redirects are rejected.
+
+Native behavior is checked in Blender 4.0.2 and 5.1. Unknown future types remain visible; unsupported inputs must be omitted only when the workflow allows it.
+
+The supplied all-types development workflow was also verified live, including all 21 output parameters and a subsequent run using returned UUIDs. That deployment returns legacy UUID strings; asset-object response support is covered by local fixtures. Uploads include explicit MIME types, and recognized file signatures correct stale download MIME labels.
+
+### Scenes, animation and media
+
+- **Scene snapshot:** copies the current scene, including unsaved image edits, and packs its dependencies in an isolated background Blender process. The active file, selection and images stay unchanged. Linked libraries must first be made local. Missing files and dependencies Blender cannot pack, such as external caches or video strips, produce an error; use a prepared scene file for those workflows. Snapshot packaging can take longer for large scenes.
+- **Scene results:** **Append Collection** adds the collection you choose to the current scene. **Open in New Blender** opens another process with automatic scripts disabled. Scene compatibility still depends on the Blender version that created the file.
+- **USDZ:** choose a root object; its descendants are exported with textures. Imported textures are copied to a unique folder beside the downloaded asset, so they survive temporary-file cleanup. Support is limited to Blender's USD capabilities.
+- **Animation:** select an armature, assign the desired action in Blender, and set the start/end frames. The addon includes meshes bound through Armature modifiers and exports the active actions of that selection. NLA tracks on the armature are temporarily muted, then restored. This is an interchange operation; it does not retarget rigs.
+- **Audio/video:** **Add to Sequencer** asks for a start frame and channel. An overlapping clip is rejected so existing strips stay in place. Video adds a movie strip; add audio separately. Supported decoding depends on the Blender build. Keep the job's files while the sequence uses them.
+- **SVG:** **Import Curves** handles the installed SVG importer's supported path geometry, not full browser rendering. When the importer is unavailable, the downloaded file remains usable.
+- **Context:** **View Context** displays JSON up to 4 MiB as read-only pages. It never executes stored instructions or fetches linked attachments. Scene and context results can each be reused as inputs for the next run.
 
 API v0.2 workflows require `version`, `api_id`, `base_url`, `name`, `inputs`, and `outputs`.
 
@@ -282,6 +342,10 @@ These folders are local user data and are intentionally ignored by Git.
 ---
 
 ## Repository Layout
+
+Release validation steps, manual cases and expected results are in
+[TESTING_GUIDE.md](TESTING_GUIDE.md). Automated commands are summarized in
+[tests/README.md](tests/README.md).
 
 ```text
 AtlasPlatform_BlenderAddon/

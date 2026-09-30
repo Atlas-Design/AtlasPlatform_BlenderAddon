@@ -36,9 +36,11 @@ from bpy.types import PropertyGroup
 try:
     from .workflow_definition import WorkflowDefinition, ParamType
     from . import workflow_manager
+    from .asset_types import FILE_FORMATS, SCENE_INPUT_TYPES
 except ImportError:
     from workflow_definition import WorkflowDefinition, ParamType
     import workflow_manager
+    from asset_types import FILE_FORMATS, SCENE_INPUT_TYPES
 
 
 log = logging.getLogger("atlas_workflow")
@@ -84,6 +86,13 @@ class AtlasJobHistoryItem(PropertyGroup):
         return names.get(self.status, "Unknown")
 
 
+class AtlasJobNoticeItem(PropertyGroup):
+    """Dismissible session notice pointing to one persisted job."""
+    job_id: StringProperty()
+    workflow_name: StringProperty()
+    failed: BoolProperty(default=False)
+
+
 class AtlasRunningJobItem(PropertyGroup):
     """
     Represents a single running job in the Running Jobs panel.
@@ -123,6 +132,17 @@ class AtlasRunningJobItem(PropertyGroup):
     )
 
 
+class AtlasAssetInputItem(PropertyGroup):
+    source_type: EnumProperty(items=[('SCENE', 'Blender Data', ''), ('FILE', 'File', ''), ('ASSET', 'Existing Asset', '')], default='FILE')
+    # Plain text avoids Blender's extra browse icon; the UI supplies a filtered picker.
+    file_path: StringProperty(name="File Path", description="Input file path; // is relative to the saved blend")
+    asset_id: StringProperty(name='Asset ID')
+    image_name: StringProperty()
+    mesh_name: StringProperty()
+    frame_start: IntProperty(name='Start Frame', default=1)
+    frame_end: IntProperty(name='End Frame', default=250)
+
+
 class AtlasWorkflowParamState(PropertyGroup):
     """
     Holds the current value and configuration for a single workflow parameter.
@@ -142,17 +162,16 @@ class AtlasWorkflowParamState(PropertyGroup):
         name="Label",
         description="UI label for this parameter",
     )
-    param_type: EnumProperty(
-        name="Type",
-        description="The data type of this parameter",
-        items=[
-            ("boolean", "Boolean", "A true/false value"),
-            ("number", "Number", "A floating-point or integer value"),
-            ("string", "String", "A text value"),
-            ("image", "Image", "A Blender Image datablock"),
-            ("mesh", "Mesh", "A Blender Mesh datablock"),
-        ],
-    )
+    param_type: StringProperty(name='Type')
+    file_format: StringProperty()
+    is_array: BoolProperty(default=False)
+    required: StringProperty(default='UNKNOWN')
+    provided: BoolProperty(name='Provide value', default=True, description='Disable to omit this input; Atlas validates required inputs and applies optional defaults')
+    has_default: BoolProperty(default=False)
+    asset_id: StringProperty(name='Asset ID')
+    asset_items: CollectionProperty(type=AtlasAssetInputItem)
+    frame_start: IntProperty(name='Start Frame', default=1)
+    frame_end: IntProperty(name='End Frame', default=250)
 
     # --- Input Source Configuration (for Image/Mesh) ---
     # Determines whether the data comes from the current scene or an external file.
@@ -162,13 +181,14 @@ class AtlasWorkflowParamState(PropertyGroup):
         items=[
             ('SCENE', 'Scene', 'Use a datablock from the current Blender file'),
             ('FILE', 'File', 'Use an external file from disk'),
+            ('ASSET', 'Existing Asset', 'Use a workspace-authorized asset ID without uploading'),
         ],
         default='SCENE',
     )
     file_path: StringProperty(
         name="File Path",
         description="Path to the external file for this parameter",
-        subtype='FILE_PATH',
+        # The UI supplies its own type-filtered file picker.
     )
 
     # --- Parameter Value Storage ---
@@ -226,6 +246,7 @@ class AtlasWorkflowState(PropertyGroup):
         type=AtlasRunningJobItem,
         description="Collection of currently running jobs"
     )
+    job_notices: CollectionProperty(type=AtlasJobNoticeItem)
     
     # --- Job History ---
     job_history: CollectionProperty(
@@ -242,7 +263,7 @@ class AtlasWorkflowState(PropertyGroup):
     def _on_filter_changed(self, context):
         """Called when any filter changes - triggers UI refresh."""
         # Force redraw of the UI
-        for area in context.screen.areas:
+        for area in context.screen.areas if context and context.screen else []:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
     
@@ -306,7 +327,7 @@ class AtlasWorkflowState(PropertyGroup):
         default=True
     )
     selected_outputs_expanded: BoolProperty(
-        name="Outputs",
+        name="Expected Outputs",
         description="Show output preview for the selected workflow",
         default=False
     )
@@ -448,11 +469,23 @@ def populate_state_from_definition(
         item = state.inputs.add()
         item.param_id = p.id
         item.label = p.label
-        item.param_type = p.type.value
+        item.param_type = getattr(p.type, 'value', p.type)
+        item.is_array = p.is_array
+        item.required = 'UNKNOWN' if p.required is None else ('REQUIRED' if p.required else 'OPTIONAL')
+        item.has_default = p.has_default
+        item.provided = True
+        item.frame_start, item.frame_end = context.scene.frame_start, context.scene.frame_end
 
         # Set default values based on parameter type
         default = p.default_value
-        if p.type == ParamType.BOOL:
+        if p.is_array:
+            if item.param_type in FILE_FORMATS and isinstance(default, list):
+                for fid in default:
+                    if isinstance(fid, str) and fid:
+                        entry = item.asset_items.add()
+                        entry.source_type = 'ASSET'
+                        entry.asset_id = fid
+        elif p.type == ParamType.BOOL:
             item.bool_value = bool(default) if default is not None else False
         elif p.type == ParamType.NUMBER:
             if isinstance(default, int):
@@ -464,17 +497,20 @@ def populate_state_from_definition(
                 item.number_value = 0.0
         elif p.type == ParamType.STRING:
             item.string_value = str(default) if default is not None else ""
-        elif p.type in (ParamType.IMAGE, ParamType.MESH):
-            # For datablock types, default to using data from the current scene.
-            # The user will select the specific datablock in the UI.
-            item.source_type = 'SCENE'
+        elif item.param_type in FILE_FORMATS:
+            item.source_type = 'SCENE' if item.param_type in SCENE_INPUT_TYPES else 'FILE'
+            if isinstance(default, str) and default:
+                item.source_type = 'ASSET'
+                item.asset_id = default
 
     # Create output parameter placeholders
     for p in wf.outputs:
         item = state.outputs.add()
         item.param_id = p.id
         item.label = p.id  # Outputs typically use their ID as the label
-        item.param_type = p.type.value
+        item.param_type = getattr(p.type, 'value', p.type)
+        item.is_array = p.is_array
+        item.file_format = p.format or ''
 
 
 # -------------------------------------------------------------------
@@ -483,7 +519,9 @@ def populate_state_from_definition(
 
 classes = (
     AtlasJobHistoryItem,  # Must be registered before AtlasWorkflowState
+    AtlasJobNoticeItem,
     AtlasRunningJobItem,  # Must be registered before AtlasWorkflowState
+    AtlasAssetInputItem,
     AtlasWorkflowParamState,
     AtlasWorkflowState,
 )

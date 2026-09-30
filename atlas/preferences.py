@@ -24,6 +24,9 @@ from bpy.props import (
 )
 import os
 import logging
+from pathlib import Path
+import tempfile
+import textwrap
 
 try:
     from . import job_manager
@@ -32,6 +35,24 @@ except ImportError:
 
 log = logging.getLogger("atlas_workflow")
 ADDON_PACKAGE = __package__.split(".")[0] if __package__ else __name__
+_console_handler = None
+_previous_log_settings = None
+
+
+def configure_logging(context=None):
+    """Configure only Atlas logging; leave Blender and other addons alone."""
+    global _console_handler, _previous_log_settings
+    if _console_handler is None:
+        _previous_log_settings = (log.level, log.propagate)
+        _console_handler = logging.StreamHandler()
+        _console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        log.addHandler(_console_handler)
+    log.propagate = False
+    log.setLevel(logging.DEBUG if is_verbose_logging(context) else logging.WARNING)
+
+
+def _logging_changed(self, context):
+    configure_logging(context)
 
 
 def set_addon_package(package_name: str) -> None:
@@ -92,28 +113,28 @@ class AtlasAddonPreferences(AddonPreferences):
 
     # --- Output Settings ---
     default_output_path: StringProperty(
-        name="Default Output Path",
-        description="Default directory for saving output files. Leave empty to use job folders",
+        name="Output Copy Folder",
+        description="Optional extra copies in per-run subfolders. Job History always keeps originals. Empty means history only",
         default="",
         subtype='DIR_PATH',
     )
     
     auto_import_meshes: BoolProperty(
         name="Auto-Import Meshes",
-        description="Automatically import mesh outputs into the scene",
+        description="Automatically import single mesh outputs into the current scene; arrays remain manual",
         default=False,
     )
     
     auto_apply_images: BoolProperty(
         name="Auto-Apply Images",
-        description="Automatically apply image outputs to the active object's material",
+        description="Apply single raster outputs to the object active at completion; arrays remain manual",
         default=False,
     )
 
     # --- Storage Settings ---
     max_storage_mb: IntProperty(
-        name="Max Storage (MB)",
-        description="Maximum storage for job history. Set to 0 for unlimited",
+        name="Storage Warning (MB)",
+        description="Warning threshold for job history, not a hard limit. Set to 0 to disable",
         default=500,
         min=0,
         max=10000,
@@ -127,8 +148,8 @@ class AtlasAddonPreferences(AddonPreferences):
     )
     
     auto_cleanup_days: IntProperty(
-        name="Auto-Cleanup (Days)",
-        description="Automatically delete jobs older than this. Set to 0 to disable",
+        name="Manual Cleanup Age (Days)",
+        description="Default age for Clean Old Jobs; nothing is deleted automatically. 0 uses 30 days",
         default=0,
         min=0,
         max=365,
@@ -153,6 +174,7 @@ class AtlasAddonPreferences(AddonPreferences):
         name="Verbose Logging",
         description="Enable detailed logging to Blender's console for debugging",
         default=False,
+        update=_logging_changed,
     )
 
     def draw(self, context):
@@ -169,7 +191,9 @@ class AtlasAddonPreferences(AddonPreferences):
             col.label(text="API v0.2+ requires a workspace API key or API_KEY env var.", icon='INFO')
 
         row = col.row()
-        row.prop(self, "request_timeout")
+        timeout_row = row.row()
+        timeout_row.enabled = not self.no_timeout_limit
+        timeout_row.prop(self, "request_timeout")
         row.prop(self, "no_timeout_limit", text="No Limit", toggle=True)
         
         if self.no_timeout_limit:
@@ -183,6 +207,19 @@ class AtlasAddonPreferences(AddonPreferences):
         
         col = box.column(align=True)
         col.prop(self, "default_output_path")
+        col.label(text="Job History always keeps originals.", icon='INFO')
+        try:
+            copy_root = get_output_copy_root(context)
+            effective_root = copy_root or os.path.join(job_manager.get_addon_root_dir(), 'atlas_jobs')
+            row = col.row(align=True)
+            row.label(text="Copy destination:" if copy_root else "History destination:")
+            row.operator('atlas.copy_to_clipboard', text='', icon='COPYDOWN').value = effective_root
+            for line in textwrap.wrap(effective_root, width=55):
+                col.label(text=line)
+            if copy_root:
+                col.label(text="Files go into separate folders for each run.")
+        except ValueError as exc:
+            col.label(text=str(exc), icon='ERROR')
         col.prop(self, "auto_import_meshes")
         col.prop(self, "auto_apply_images")
         
@@ -196,6 +233,7 @@ class AtlasAddonPreferences(AddonPreferences):
         row.prop(self, "warn_on_storage_limit", text="Warn", toggle=True)
         
         col.prop(self, "auto_cleanup_days")
+        col.label(text="Cleanup runs only when requested.", icon='INFO')
         
         # Storage info
         file_count, total_bytes = job_manager.get_jobs_storage_size()
@@ -206,12 +244,12 @@ class AtlasAddonPreferences(AddonPreferences):
         row.label(text=storage_text)
         
         if self.max_storage_mb > 0 and total_mb > self.max_storage_mb:
-            row.label(text="⚠ Over limit!", icon='ERROR')
+            row.label(text="Over warning threshold", icon='ERROR')
         
         # Storage actions
         row = col.row(align=True)
         row.operator("atlas.cleanup_old_jobs", text="Clean Old Jobs", icon='TRASH')
-        row.operator("atlas.clear_all_jobs", text="Clear All", icon='X')
+        row.operator("atlas.clear_all_jobs", text="Clear Finished Jobs", icon='X')
         
         # Temp cache cleanup
         col.separator()
@@ -273,7 +311,7 @@ class ATLAS_OT_CleanupOldJobs(Operator):
         for job in jobs:
             try:
                 created = datetime.fromisoformat(job.CreatedAtUtc.replace('Z', '+00:00'))
-                if created.timestamp() < cutoff:
+                if created.timestamp() < cutoff and job_manager.can_delete_job(job):
                     old_jobs.append(job)
             except:
                 pass
@@ -300,9 +338,9 @@ class ATLAS_OT_CleanupOldJobs(Operator):
 
 
 class ATLAS_OT_ClearAllJobs(Operator):
-    """Delete ALL job history - this cannot be undone!"""
+    """Delete finished job history; queued and running jobs are preserved"""
     bl_idname = "atlas.clear_all_jobs"
-    bl_label = "Clear All Job History"
+    bl_label = "Clear Finished Job History"
     bl_options = {'REGISTER'}
     
     confirm: BoolProperty(
@@ -317,17 +355,15 @@ class ATLAS_OT_ClearAllJobs(Operator):
         layout = self.layout
         
         # Warning
-        layout.label(text="⚠ WARNING: This will delete ALL job history!", icon='ERROR')
-        layout.label(text="All job records and output files will be permanently removed.")
+        layout.label(text="Delete all finished job history?", icon='ERROR')
+        layout.label(text="Finished records and their stored outputs will be removed.")
+        layout.label(text="Queued and running jobs are kept.")
+        layout.label(text="Exported copies are kept.")
         layout.separator()
         
         # Show what will be deleted
-        jobs = job_manager.get_all_jobs()
-        file_count, total_bytes = job_manager.get_jobs_storage_size()
-        total_mb = total_bytes / (1024 * 1024)
-        
+        jobs = [job for job in job_manager.get_all_jobs() if job_manager.can_delete_job(job)]
         layout.label(text=f"Jobs to delete: {len(jobs)}")
-        layout.label(text=f"Space to free: {total_mb:.1f} MB ({file_count} files)")
         layout.separator()
         
         layout.prop(self, "confirm")
@@ -398,6 +434,36 @@ def get_effective_timeout(context=None) -> float:
         return None  # No timeout
     
     return float(prefs.request_timeout)
+
+
+def get_output_copy_root(context=None) -> str:
+    """Resolve the optional copy folder without creating files during UI draw."""
+    prefs = get_preferences(context)
+    value = prefs.default_output_path.strip() if prefs else ''
+    if not value:
+        return ''
+    if value.startswith('//'):
+        if not bpy.data.filepath:
+            raise ValueError('Save the .blend before using a relative output folder.')
+        value = bpy.path.abspath(value)
+    value = os.path.expanduser(value)
+    if not os.path.isabs(value):
+        raise ValueError('Choose an absolute folder or a // blend-relative folder.')
+    path = Path(value).resolve()
+    history = Path(job_manager.get_jobs_root_dir(create=False)).resolve()
+    if path == history or history in path.parents:
+        raise ValueError('Choose a copy folder outside Job History storage.')
+    return str(path)
+
+
+def prepare_output_copy_root(context=None) -> str:
+    """Reject an unusable destination before starting a remote execution."""
+    path = get_output_copy_root(context)
+    if path:
+        os.makedirs(path, exist_ok=True)
+        with tempfile.TemporaryFile(dir=path):
+            pass
+    return path
 
 
 def get_poll_interval(context=None) -> float:
@@ -486,11 +552,20 @@ def register():
     """Register preference classes"""
     for cls in classes:
         bpy.utils.register_class(cls)
+    configure_logging()
     
     log.info("[Atlas Preferences] Registered addon preferences")
 
 
 def unregister():
     """Unregister preference classes"""
+    global _console_handler, _previous_log_settings
+    if _console_handler is not None:
+        log.removeHandler(_console_handler)
+        _console_handler.close()
+        _console_handler = None
+        log.setLevel(_previous_log_settings[0])
+        log.propagate = _previous_log_settings[1]
+        _previous_log_settings = None
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

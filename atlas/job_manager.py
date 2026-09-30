@@ -80,6 +80,16 @@ class ParamSnapshot:
     ImageValue: Optional[str] = None  # Image name in Blender
     MeshValue: Optional[str] = None   # Object name in Blender
     FilePath: Optional[str] = None    # Path to file (for inputs/outputs)
+    IsArray: bool = False
+    Provided: bool = True
+    Format: str = ''
+    AssetId: str = ''
+    ApiOrigin: str = ''
+    Items: List[Dict[str, Any]] = field(default_factory=list)
+    RawValue: Any = None
+    SceneValue: str = ''
+    FrameStart: Optional[int] = None
+    FrameEnd: Optional[int] = None
 
 
 @dataclass
@@ -118,6 +128,7 @@ class JobRecord:
     
     # --- File System ---
     JobFolderPath: str = ""
+    OutputCopyFolder: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -144,7 +155,7 @@ class JobRecord:
 # Job Manager Functions
 # ---------------------------------------------------------------------------
 
-def get_jobs_root_dir() -> str:
+def get_jobs_root_dir(create: bool = True) -> str:
     """
     Get the root directory for all job folders.
     Creates the directory if it doesn't exist.
@@ -155,7 +166,7 @@ def get_jobs_root_dir() -> str:
     addon_dir = get_addon_root_dir()
     jobs_dir = os.path.join(addon_dir, "atlas_jobs")
     
-    if not os.path.exists(jobs_dir):
+    if create and not os.path.exists(jobs_dir):
         os.makedirs(jobs_dir)
         log.info(f"[Atlas Jobs] Created jobs directory: {jobs_dir}")
     
@@ -169,14 +180,20 @@ def _sanitize_folder_name(name: str) -> str:
     for char in invalid_chars:
         name = name.replace(char, '_')
     # Limit length
-    return name[:50]
+    name = name[:50].strip(' .') or 'Workflow'
+    if name.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
+                                    *(f'COM{i}' for i in range(1, 10)),
+                                    *(f'LPT{i}' for i in range(1, 10))}:
+        name = '_' + name
+    return name
 
 
 def create_job(
     workflow_id: str,
     workflow_name: str,
     workflow_version: str,
-    inputs_snapshot: List[ParamSnapshot]
+    inputs_snapshot: List[ParamSnapshot],
+    output_copy_root: str = "",
 ) -> JobRecord:
     """
     Create a new job record and folder structure.
@@ -211,6 +228,11 @@ def create_job(
     os.makedirs(job_folder, exist_ok=True)
     os.makedirs(os.path.join(job_folder, "inputs"), exist_ok=True)
     os.makedirs(os.path.join(job_folder, "outputs"), exist_ok=True)
+    copy_folder = ""
+    if output_copy_root:
+        copy_folder = os.path.join(output_copy_root, _sanitize_folder_name(workflow_name),
+                                   f"{timestamp}_{job_id}")
+        os.makedirs(copy_folder, exist_ok=False)
     
     log.info(f"[Atlas Jobs] Created job folder: {job_folder}")
     
@@ -229,6 +251,7 @@ def create_job(
         InputsSnapshot=inputs_dict,
         OutputsSnapshot=[],
         JobFolderPath=job_folder,
+        OutputCopyFolder=copy_folder,
     )
     
     # Save initial state
@@ -364,7 +387,7 @@ def save_output_file_to_job(job: JobRecord, param_id: str, source_path: str) -> 
         return source_path
     
     # Determine destination path
-    ext = os.path.splitext(source_path)[1]
+    ext = '.atlas-context.json' if source_path.endswith('.atlas-context.json') else os.path.splitext(source_path)[1]
     dest_filename = f"Output_{param_id}{ext}"
     dest_path = os.path.join(job.JobFolderPath, "outputs", dest_filename)
     
@@ -373,6 +396,36 @@ def save_output_file_to_job(job: JobRecord, param_id: str, source_path: str) -> 
     log.debug(f"[Atlas Jobs] Saved output {param_id} to {dest_path}")
     
     return dest_path
+
+
+def export_output_copies(job: JobRecord) -> None:
+    """Copy saved file outputs without changing the paths owned by history."""
+    if not job.OutputCopyFolder:
+        return
+    errors, seen = [], set()
+    for output in job.OutputsSnapshot:
+        items = output.get('Items') or [output]
+        for item in items:
+            source = item.get('FilePath')
+            if not source or source in seen:
+                continue
+            seen.add(source)
+            created_copy = False
+            try:
+                destination = os.path.join(job.OutputCopyFolder, os.path.basename(source))
+                # Never overwrite a file the user may have placed in this folder.
+                with open(source, 'rb') as src, open(destination, 'xb') as dst:
+                    created_copy = True
+                    shutil.copyfileobj(src, dst)
+            except OSError as exc:
+                if created_copy:
+                    try:
+                        os.unlink(destination)
+                    except OSError:
+                        pass
+                errors.append(f'{os.path.basename(source)}: {exc}')
+    if errors:
+        raise OSError('Output copy failed; originals are safe in Job History. ' + '; '.join(errors))
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +451,8 @@ def get_job(job_folder_path: str) -> Optional[JobRecord]:
     try:
         with open(job_file, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # The scanned directory is authoritative, not a path from JSON metadata.
+        data['JobFolderPath'] = os.path.abspath(job_folder_path)
         return JobRecord.from_dict(data)
     except Exception as e:
         log.error(f"[Atlas Jobs] Failed to load job from {job_file}: {e}")
@@ -454,6 +509,19 @@ def get_jobs_for_workflow(workflow_name: str) -> List[JobRecord]:
     return [j for j in all_jobs if j.WorkflowName == workflow_name]
 
 
+def can_delete_job(job: JobRecord) -> bool:
+    """Only finished jobs in the managed workflow/job layout may be removed."""
+    if job.Status not in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+        return False
+    try:
+        root = Path(get_jobs_root_dir()).resolve()
+        folder = Path(job.JobFolderPath).resolve()
+        relative = folder.relative_to(root)
+        return len(relative.parts) == 2 and (folder / 'job.json').is_file()
+    except (ValueError, OSError):
+        return False
+
+
 def delete_job(job: JobRecord) -> bool:
     """
     Delete a job and its folder.
@@ -464,12 +532,12 @@ def delete_job(job: JobRecord) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    if not job.JobFolderPath or not os.path.exists(job.JobFolderPath):
-        log.warning(f"[Atlas Jobs] Job folder not found: {job.JobFolderPath}")
+    if not job.JobFolderPath or not can_delete_job(job):
+        log.debug(f"[Atlas Jobs] Preserved unfinished or unmanaged job: {job.JobFolderPath}")
         return False
     
     try:
-        shutil.rmtree(job.JobFolderPath)
+        shutil.rmtree(str(Path(job.JobFolderPath).resolve()))
         log.info(f"[Atlas Jobs] Deleted job {job.JobId[:8]}")
         return True
     except Exception as e:

@@ -20,6 +20,13 @@ import logging
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urljoin, urlsplit
+from email.message import Message
+
+try:
+    from .asset_types import normalize_asset, output_extension, upload_mime, detected_extension, file_extension
+except ImportError:
+    from asset_types import normalize_asset, output_extension, upload_mime, detected_extension, file_extension
 
 
 def get_addon_root_dir() -> str:
@@ -224,12 +231,14 @@ class AtlasAPIClient:
         log.debug(f"[Atlas API] Uploading {file_name} to {url}")
 
         with open(file_path, "rb") as f:
-            files = {"file": (file_name, f)}
+            files = {"file": (file_name, f, upload_mime(file_name))}
             response = requests.post(url, headers=self._headers(), files=files, timeout=self.timeout)
 
         self._raise_for_status(response, "File upload")
         result = response.json()
-        file_id = result.get("file_id")
+        file_id = result.get("file_id") or result.get('fid')
+        if not isinstance(file_id, str) or not file_id:
+            raise ValueError('Upload response did not contain a file ID')
 
         log.debug(f"[Atlas API] Upload complete: {file_id}")
         return file_id
@@ -251,7 +260,7 @@ class AtlasAPIClient:
         url = self._build_url("api_execute_async", api_id)
 
         log.debug(f"[Atlas API] Executing workflow {api_id}")
-        log.debug(f"[Atlas API] Payload: {payload}")
+        log.debug("[Atlas API] Submitting %d input parameters", len(payload))
 
         response = requests.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
 
@@ -335,40 +344,78 @@ class AtlasAPIClient:
             progress=progress
         )
 
-    def download_file(self, api_id: str, file_id: str, output_path: str) -> str:
+    def download_file(self, api_id: str, file_id, output_path: str) -> str:
+        """Stream an asset or legacy file ID; return its actual local filename.
+
+        Bearer credentials are sent only to the configured API origin. A
+        different asset host can still be accessed through the canonical
+        fid endpoint, avoiding disclosure of the workspace key to that host.
         """
-        Download an output file from the API.
-        
-        Args:
-            api_id: The workflow API ID
-            file_id: The file_id from the outputs
-            output_path: Local path to save the file
-            
-        Returns:
-            The output_path (for convenience)
-            
-        Raises:
-            requests.HTTPError: If download fails
-        """
-        url = (
-            self._build_url("download_binary_result", file_id)
-            if self.uses_v2_routes
-            else self._build_url("download_binary_result", api_id, file_id)
-        )
+        asset = normalize_asset(file_id)
+        canonical = (self._build_url('download_binary_result', asset.fid)
+                     if self.uses_v2_routes else self._build_url('download_binary_result', api_id, asset.fid))
 
-        log.debug(f"[Atlas API] Downloading {file_id} to {output_path}")
+        def origin(url):
+            parsed = urlsplit(url)
+            if parsed.username or parsed.password or parsed.scheme not in ('https', 'http'):
+                raise ValueError('Invalid asset download URL')
+            return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80)
 
-        response = requests.get(url, headers=self._headers(), timeout=self.timeout)
-        self._raise_for_status(response, "File download")
-
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        with open(output_path, "wb") as f:
-            f.write(response.content)
-
-        log.debug(f"[Atlas API] Download complete: {output_path}")
-        return output_path
+        trusted = origin(self.base_url)
+        url = urljoin(self.base_url + '/', asset.download_url) if asset.download_url else canonical
+        if origin(url) != trusted:
+            url = canonical
+        response = None
+        partial = ''
+        try:
+            for _ in range(6):
+                if origin(url) != trusted:
+                    raise ValueError('Asset download redirected outside the API origin')
+                response = requests.get(url, headers=self._headers(), timeout=self.timeout,
+                                        stream=True, allow_redirects=False)
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = response.headers.get('Location')
+                response.close()
+                if not location:
+                    raise ValueError('Asset download redirect has no location')
+                url = urljoin(url, location)
+            else:
+                raise ValueError('Too many asset download redirects')
+            self._raise_for_status(response, 'File download')
+            mime = response.headers.get('Content-Type', '') or asset.mime
+            header = Message()
+            header['content-disposition'] = response.headers.get('Content-Disposition', '')
+            filename = header.get_filename() or asset.filename
+            declared = file_extension(output_path)
+            ext = output_extension('', declared, mime, filename)
+            # Preserve the complete context-file suffix when MIME is unspecified.
+            if output_path.endswith('.atlas-context.json') and ext == 'json':
+                ext = 'atlas-context.json'
+            stem = output_path[:-len('.atlas-context.json')] if output_path.endswith('.atlas-context.json') else os.path.splitext(output_path)[0]
+            output_path = stem + '.' + ext
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            partial = output_path + '.part'
+            prefix = b''
+            with open(partial, 'wb') as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        if len(prefix) < 64:
+                            prefix += chunk[:64 - len(prefix)]
+                        handle.write(chunk)
+            concrete = detected_extension(prefix, '')
+            if prefix.startswith(b'PK\x03\x04') and declared == 'usdz':
+                concrete = 'usdz'
+            if concrete:
+                ext = concrete
+            output_path = stem + '.' + ext
+            os.replace(partial, output_path)
+            return output_path
+        finally:
+            if response is not None:
+                response.close()
+            if partial and os.path.exists(partial):
+                os.remove(partial)
 
 
 # ---------------------------------------------------------------------------

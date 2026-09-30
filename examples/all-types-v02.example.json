@@ -1,0 +1,196 @@
+{
+  "version": "0.2",
+  "api_id": "00000000-0000-4000-8000-000000000000",
+  "base_url": "https://api.example.invalid",
+  "name": "All Types Example",
+  "inputs": [
+    {
+      "id": "number_input",
+      "type": "number",
+      "label": "number_input",
+      "default_value": 42
+    },
+    {
+      "id": "mesh_input",
+      "type": "mesh",
+      "label": "mesh_input"
+    },
+    {
+      "id": "boolean_input",
+      "type": "boolean",
+      "label": "boolean_input",
+      "default_value": true
+    },
+    {
+      "id": "text_input",
+      "type": "string",
+      "label": "text_input",
+      "default_value": "Sample text"
+    },
+    {
+      "id": "audio_input",
+      "type": "audio",
+      "label": "audio_input"
+    },
+    {
+      "id": "scene_input",
+      "type": "scene",
+      "label": "scene_input"
+    },
+    {
+      "id": "video_input",
+      "type": "video",
+      "label": "video_input"
+    },
+    {
+      "id": "meshes_input",
+      "type": "mesh",
+      "label": "meshes_input",
+      "isArray": true,
+      "default_value": []
+    },
+    {
+      "id": "images_input",
+      "type": "image",
+      "label": "images_input",
+      "isArray": true,
+      "default_value": []
+    },
+    {
+      "id": "pdf_input",
+      "type": "pdf",
+      "label": "pdf_input"
+    },
+    {
+      "id": "usdz_input",
+      "type": "usdz",
+      "label": "usdz_input"
+    },
+    {
+      "id": "conversation_input",
+      "type": "agent_context",
+      "label": "conversation_input"
+    },
+    {
+      "id": "image_input",
+      "type": "image",
+      "label": "image_input"
+    },
+    {
+      "id": "exr_input",
+      "type": "exr",
+      "label": "exr_input"
+    },
+    {
+      "id": "animation_input",
+      "type": "rig_animation",
+      "label": "animation_input"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "avif_output",
+      "type": "avif",
+      "format": "avif"
+    },
+    {
+      "id": "tiff_output",
+      "type": "tiff",
+      "format": "tiff"
+    },
+    {
+      "id": "number_output",
+      "type": "number"
+    },
+    {
+      "id": "mesh_output",
+      "type": "mesh",
+      "format": "glb"
+    },
+    {
+      "id": "boolean_output",
+      "type": "boolean"
+    },
+    {
+      "id": "text_output",
+      "type": "string"
+    },
+    {
+      "id": "audio_output",
+      "type": "audio",
+      "format": "mp3"
+    },
+    {
+      "id": "scene_output",
+      "type": "scene",
+      "format": "blend"
+    },
+    {
+      "id": "jpeg_output",
+      "type": "jpeg",
+      "format": "jpg"
+    },
+    {
+      "id": "video_output",
+      "type": "video",
+      "format": "mp4"
+    },
+    {
+      "id": "tga_output",
+      "type": "tga",
+      "format": "tga"
+    },
+    {
+      "id": "webp_output",
+      "type": "webp",
+      "format": "webp"
+    },
+    {
+      "id": "meshes_output",
+      "type": "mesh",
+      "isArray": true,
+      "format": "glb"
+    },
+    {
+      "id": "images_output",
+      "type": "image",
+      "isArray": true,
+      "format": "png"
+    },
+    {
+      "id": "pdf_output",
+      "type": "pdf",
+      "format": "pdf"
+    },
+    {
+      "id": "usdz_output",
+      "type": "usdz",
+      "format": "usdz"
+    },
+    {
+      "id": "conversation_output",
+      "type": "agent_context",
+      "format": "atlas-context.json"
+    },
+    {
+      "id": "svg_output",
+      "type": "svg",
+      "format": "svg"
+    },
+    {
+      "id": "image_output",
+      "type": "image",
+      "format": "png"
+    },
+    {
+      "id": "exr_output",
+      "type": "exr",
+      "format": "exr"
+    },
+    {
+      "id": "animation_output",
+      "type": "rig_animation",
+      "format": "glb"
+    }
+  ]
+}
