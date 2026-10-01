@@ -15,6 +15,7 @@ parameter type, keeping the panel classes clean and focused.
 
 import os
 import json
+import textwrap
 import bpy
 from datetime import datetime, timezone, timedelta
 try:
@@ -22,12 +23,14 @@ try:
     from . import workflow_manager
     from . import job_manager
     from . import native_assets
+    from . import operators
     from .asset_types import FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES
 except ImportError:
     import custom_icons
     import workflow_manager
     import job_manager
     import native_assets
+    import operators
     from asset_types import FILE_FORMATS, PRIMITIVE_TYPES, RASTER_TYPES, SCENE_INPUT_TYPES
 
 
@@ -79,70 +82,6 @@ class ATLAS_PT_BasePanel(bpy.types.Panel):
 # --- UI Panels ---
 # -------------------------------------------------------------------
 
-class ATLAS_PT_RunningJobsPanel(bpy.types.Panel):
-    """
-    Dedicated panel for displaying all running jobs.
-    
-    Supports multiple concurrent jobs running on the server.
-    Only visible when at least one job is running.
-    """
-    bl_idname = "ATLAS_PT_running_jobs_panel"
-    bl_label = "Running Jobs"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Atlas"
-    bl_order = 1  # Appears right after main control panel
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        """Only show this panel when at least one job is running."""
-        state = context.window_manager.atlas_workflow_state
-        return state and len(state.running_jobs) > 0
-
-    def draw(self, context: bpy.types.Context):
-        layout = self.layout
-        state = context.window_manager.atlas_workflow_state
-
-        # Draw each running job
-        for job in state.running_jobs:
-            self._draw_running_job(layout, job)
-    
-    def _draw_running_job(self, layout, job):
-        """Draw a single running job entry (compact layout)."""
-        box = layout.box()
-        
-        # Row 1: Status icon + Workflow name + Elapsed time
-        row1 = box.row(align=True)
-        
-        # Status icon based on phase
-        phase = job.current_phase.lower()
-        if phase == "running":
-            row1.label(text="", icon='PLAY')
-        elif phase == "pending":
-            row1.label(text="", icon='PAUSE')
-        elif phase == "uploading":
-            row1.label(text="", icon='EXPORT')
-        elif phase == "downloading":
-            row1.label(text="", icon='IMPORT')
-        else:
-            row1.label(text="", icon='SORTTIME')
-        
-        row1.label(text=job.workflow_name or "Workflow")
-        row1.label(text=job.elapsed_time)
-        
-        # Atlas does not report a completion percentage. Show activity honestly.
-        row2 = box.row(align=True)
-        status_text = {
-            'initializing': 'Starting', 'submitting': 'Submitting',
-            'pending': 'Queued', 'uploading': 'Uploading',
-            'downloading': 'Downloading', 'running': 'Running',
-            'completed': 'Saving results', 'failed': 'Finishing',
-        }.get(phase, 'Working')
-        row2.label(text=status_text, icon='TIME')
-        op = box.operator("atlas.select_job", text="View in Job History", icon='FORWARD')
-        op.job_id = job.job_id
-
-
 class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
     """
     The main addon panel for loading workflows.
@@ -151,7 +90,7 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
     Shows workflow library controls and loaded workflow info.
     """
     bl_idname = "ATLAS_PT_main_control_panel"
-    bl_label = "Atlas Workflow Library"
+    bl_label = "Atlas"
     bl_order = 0  # Ensures this panel is at the top
 
     @classmethod
@@ -160,6 +99,33 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
         return True
 
     def draw(self, context: bpy.types.Context):
+        layout = self.layout
+        state = context.window_manager.atlas_workflow_state
+        layout.prop(state, 'view_mode', expand=True)
+        if not state.history_loaded and not JobsView._auto_load_scheduled:
+            JobsView._auto_load_scheduled = True
+            bpy.app.timers.register(JobsView._deferred_load_history, first_interval=0.1)
+        unread = [job for job in state.job_history if not job.reviewed and job.status in (2, 3, 4)]
+        row = layout.row(align=True)
+        row.label(text=f'{len(state.running_jobs)} running', icon='TIME')
+        if unread:
+            label = '1 new result' if len(unread) == 1 else f'{len(unread)} new results'
+            row.operator('atlas.select_job', text=label, icon='FORWARD').job_id = unread[0].job_id
+        else:
+            row.label(text='No new results')
+        layout.separator()
+        if state.view_mode == 'RUN':
+            self.draw_run_controls(context)
+            if state.active_api_id:
+                WorkflowForm.draw(self, context)
+            else:
+                layout.label(text='Choose or import a workflow to start.', icon='INFO')
+        else:
+            view = JobsView()
+            view.layout = layout
+            view.draw(context)
+
+    def draw_run_controls(self, context):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
 
@@ -188,36 +154,19 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
             if state.is_active_workflow_savable:
                 layout.operator("atlas.save_active_workflow", text="Save to Library", icon='ADD')
 
-        for notice in reversed(state.job_notices):
-            box = layout.box()
-            row = box.row(align=True)
-            row.label(text=f"{notice.workflow_name} · {'Needs attention' if notice.failed else 'Completed'}",
-                      icon='ERROR' if notice.failed else 'CHECKMARK')
-            row.operator("atlas.dismiss_job_notice", text="", icon='X').job_id = notice.job_id
-            box.operator("atlas.select_job", text="View Results", icon='FORWARD').job_id = notice.job_id
 
-
-class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
+class WorkflowForm:
     """
     Combined panel showing the selected workflow's inputs, outputs preview, and run button.
     Only visible when a workflow is selected.
     """
-    bl_idname = "ATLAS_PT_selected_workflow_panel"
-    bl_label = "Selected Workflow"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Atlas"
-    bl_order = 3  # History links open results above the workflow's input controls.
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        """Only visible when a workflow is actually selected."""
-        state = context.window_manager.atlas_workflow_state
-        return state and state.active_api_id
-
     def draw(self, context: bpy.types.Context):
         layout = self.layout
         state = context.window_manager.atlas_workflow_state
+
+        if state.draft_notice:
+            for line in textwrap.wrap(state.draft_notice, width=45):
+                layout.label(text=line)
 
         # --- INPUTS SECTION ---
         if state.inputs:
@@ -234,7 +183,7 @@ class ATLAS_PT_SelectedWorkflowPanel(bpy.types.Panel):
                 layout, state, "selected_outputs_expanded", f"Expected Outputs ({len(state.outputs)})", 'INFO'
             )
             outputs_box.label(text="Results from each run appear", icon='INFO')
-            outputs_box.label(text="in Job History.")
+            outputs_box.label(text="in Jobs.")
             if expanded:
                 # Plain labels describe the contract even before a run exists.
                 col = outputs_box.column(align=True)
@@ -276,13 +225,16 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
                 row.label(text="", icon='PAUSE')
             
             # Workflow name (takes remaining space)
-            row.label(text=item.workflow_name)
+            run_id = str(item.run_number) if item.run_number else item.job_id[:8]
+            row.label(text=f'#{run_id} · {item.user_label or item.workflow_name}')
+            running = next((job for job in context.window_manager.atlas_workflow_state.running_jobs
+                            if job.job_id == item.job_id), None)
+            if running:
+                row.label(text=running.elapsed_time)
+            if not item.reviewed and item.status in (2, 3, 4):
+                row.label(text='', icon='REC')
             
-            # Time display (compact)
-            row.label(text=item.created_at_display)
-            
-            op = row.operator("atlas.select_job", text="View Results" if item.status in (2, 3) else "View Job",
-                              icon='FORWARD')
+            op = row.operator("atlas.select_job", text="", icon='FORWARD')
             op.job_id = item.job_id
             
         elif self.layout_type == 'GRID':
@@ -332,25 +284,12 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
         return flt_flags, flt_neworder
 
 
-class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
+class JobsView:
     """
     Two-state panel for browsing job history.
     - List View: Shows filters + job list
     - Detail View: Shows full details of selected job
     """
-    bl_idname = "ATLAS_PT_job_history_panel"
-    bl_label = "Job History"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Atlas"
-    bl_order = 2
-    bl_options = {'DEFAULT_CLOSED'}
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context) -> bool:
-        """Always show history panel."""
-        return True
-
     # Class variable to track if we've scheduled auto-load
     _auto_load_scheduled = False
     
@@ -359,8 +298,8 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         state = context.window_manager.atlas_workflow_state
 
         # Auto-load job history if empty (first time panel is opened)
-        if len(state.job_history) == 0 and not ATLAS_PT_JobHistoryPanel._auto_load_scheduled:
-            ATLAS_PT_JobHistoryPanel._auto_load_scheduled = True
+        if not state.history_loaded and not JobsView._auto_load_scheduled:
+            JobsView._auto_load_scheduled = True
             bpy.app.timers.register(self._deferred_load_history, first_interval=0.1)
         
         # Two-state panel: List View vs Detail View
@@ -378,6 +317,8 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
         
         # Filter row 2: Workflow dropdown
         layout.prop(state, "filter_workflow", text="")
+        if not state.job_history:
+            layout.label(text='Your runs and results will appear here.', icon='INFO')
         
         # Job list - each row has its own view button
         row = layout.row()
@@ -391,6 +332,11 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             rows=5,
             maxrows=8,
         )
+        if 0 <= state.job_history_index < len(state.job_history):
+            selected = state.job_history[state.job_history_index]
+            layout.label(text=f'{selected.created_at_display} · {selected.result_summary}')
+            layout.operator('atlas.select_job', text='View Results' if selected.status in (2, 3) else 'View Job',
+                            icon='FORWARD').job_id = selected.job_id
         
         # Just refresh button at bottom
         layout.operator("atlas.refresh_job_history", text="", icon='FILE_REFRESH')
@@ -436,8 +382,22 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             status_text = f"{running_job.status} · {running_job.elapsed_time}"
         
         header_col = header_row.column()
-        header_col.label(text=selected_job.workflow_name)
-        header_col.label(text=f"{selected_job.created_at_display} • {status_text}")
+        run_id = str(full_job.RunNumber) if full_job.RunNumber else full_job.JobId[:8]
+        header_col.label(text=f'Run {run_id} · {selected_job.workflow_name}')
+        if full_job.UserLabel:
+            header_col.label(text=full_job.UserLabel)
+        try:
+            timestamp = datetime.fromisoformat(full_job.CreatedAtUtc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            timestamp = full_job.CreatedAtUtc
+        header_col.label(text=timestamp)
+        header_col.label(text=status_text)
+        header_col.label(text=job_manager.result_summary(full_job))
+        row = layout.row(align=True)
+        row.operator('atlas.rename_job', text='', icon='GREASEPENCIL').job_folder_path = full_job.JobFolderPath
+        restore_row = row.row(align=True)
+        restore_row.enabled = bool(full_job.WorkflowSnapshot)
+        restore_row.operator('atlas.use_job_inputs', text='Use These Inputs', icon='LOOP_BACK').job_folder_path = full_job.JobFolderPath
         if full_job.OutputCopyFolder:
             layout.operator('atlas.open_job_folder', text='Open Output Copies',
                             icon='FILE_FOLDER').job_folder_path = full_job.OutputCopyFolder
@@ -594,7 +554,7 @@ class ATLAS_PT_JobHistoryPanel(bpy.types.Panel):
             bpy.ops.atlas.refresh_job_history()
         except:
             pass
-        ATLAS_PT_JobHistoryPanel._auto_load_scheduled = False
+        JobsView._auto_load_scheduled = False
         return None  # Don't repeat
 
 
@@ -610,8 +570,14 @@ def draw_asset_result(layout, param_type, record):
         # AVIF was added after our oldest supported Blender versions.
         can_preview = not path.lower().endswith('.avif') or bpy.app.version >= (5, 1, 0)
         if param_type in RASTER_TYPES and can_preview:
-            for operator, text in [('atlas.view_job_output_image', 'View'), ('atlas.apply_job_output_image', 'Apply')]:
-                op = row.operator(operator, text=text)
+            preview = operators.get_image_preview(path)
+            if preview:
+                layout.template_icon(icon_value=preview.icon_id, scale=5.0)
+            layout.operator('atlas.view_job_output_image', text='Preview', icon='IMAGE_DATA').file_path = path
+            image_actions = layout.row(align=True)
+            for operator, text in [('atlas.add_image_plane', 'Add Plane'),
+                                   ('atlas.apply_job_output_image', 'Apply Material')]:
+                op = image_actions.operator(operator, text=text)
                 op.file_path = path
         elif param_type == 'mesh' and path.lower().endswith(('.glb', '.gltf')):
             op = row.operator('atlas.import_job_output_mesh', text='Import', icon='IMPORT')
@@ -785,9 +751,6 @@ def draw_output_param(context: bpy.types.Context, layout: bpy.types.UILayout, it
 classes = (
     ATLAS_UL_JobHistoryList,  # UIList must be registered first
     ATLAS_PT_MainControlPanel,
-    ATLAS_PT_RunningJobsPanel,
-    ATLAS_PT_SelectedWorkflowPanel,
-    ATLAS_PT_JobHistoryPanel,
 )
 
 
@@ -799,6 +762,9 @@ def register():
 
 def unregister():
     """Unregisters all UI panel classes from Blender."""
+    if bpy.app.timers.is_registered(JobsView._deferred_load_history):
+        bpy.app.timers.unregister(JobsView._deferred_load_history)
+    JobsView._auto_load_scheduled = False
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 

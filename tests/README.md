@@ -38,15 +38,24 @@ For the native adapters and the full inherited regression suite:
 Validated with Blender 4.0.2 and 5.1. Tests include scene dependency packaging,
 unsaved pixels, collection append, USDZ texture survival across reopening,
 skinned animation and motion, SVG curves, media timing/overlap and context reuse.
-The native suite now contains 39 checks (including the 30 base regressions);
-the parser/transport suite contains 12. The original 27 native checks passed on
-both versions during the API update. After the results UX changes, all 22 base
-regressions passed on both versions, including stable history navigation,
-concurrent completion notices, dismissal without deletion and execution phases.
-The settings audit adds eight further regressions for output folder validation,
-copy failures, notification toggles, logging, cleanup safety and preference helpers.
-All 30 base regressions passed on both Blender versions on 2026-09-30; all 12
-parser/transport checks also passed. Installed-UI settings checks remain manual.
+The native suite contains **43 checks**, including **34 base regressions**;
+the parser/transport suite contains **12**. Both Blender versions pass the native
+suite. Coverage includes per-workflow drafts, historical source reuse, run labels,
+persistent unreviewed results, explicit navigation and non-destructive image preview,
+as well as settings, storage safety and concurrent execution.
+
+For an actual native GUI smoke run with synthetic results (no Atlas calls):
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 5.1\blender.exe' --factory-startup --python-exit-code 1 --python tests/blender_ui_smoke.py -- --output M:/P4-PLUGINS/Blender-QA/run-jobs-ui
+```
+
+Run in a separate disposable Blender process. The script captures Run, Jobs,
+job details and the image preview popup, writes `report.json` with draw errors,
+and quits. On Blender 4.0, the harness temporarily draws the panel under Item
+because category selection is unavailable through RNA; production uses Atlas.
+Inspect the captures as well as the report. It does not install the
+release ZIP or replace the interactive acceptance cases in the testing guide.
 
 `create_live_fixtures.py` generates small synthetic assets in a supplied directory
 when run in factory-startup background Blender. `live_api_smoke.py` is an opt-in

@@ -111,7 +111,8 @@ class BlenderRegressions(unittest.TestCase):
         bpy.ops.object.delete(use_global=False)
         self.state = bpy.context.window_manager.atlas_workflow_state
         state_module.clear_workflow_state(self.state)
-        self.state.job_notices.clear()
+        self.state.workflow_drafts_json = '{}'
+        self.state.view_mode = 'RUN'
         self.state.job_history_detail_mode = False
         self.state.job_history_index = -1
         self.runner = Runner()
@@ -182,8 +183,8 @@ class BlenderRegressions(unittest.TestCase):
                     bpy.ops.atlas.select_job(job_id=runners[1]._job.JobId)
             self.assertEqual(self.state.job_history[self.state.job_history_index].job_id,
                              runners[1]._job.JobId)
-            self.assertEqual([n.job_id for n in self.state.job_notices],
-                             [runners[1]._job.JobId, runners[0]._job.JobId])
+            self.assertFalse(jobs.get_job(runners[0]._job.JobFolderPath).Reviewed)
+            self.assertTrue(jobs.get_job(runners[1]._job.JobFolderPath).Reviewed)
             self.assertEqual(self.state.active_api_id, 'B')
             self.assertFalse(self.state.job_running)
             self.assertTrue(Path(self.state.outputs[1].temp_file_path).is_file())
@@ -222,15 +223,17 @@ class BlenderRegressions(unittest.TestCase):
         self.assertFalse(self.state.job_history_detail_mode)
         self.assertEqual(self.state.job_history_index, -1)
 
-    def test_completion_notice_does_not_navigate_and_dismiss_keeps_results(self):
+    def test_unreviewed_results_do_not_navigate_and_review_persists(self):
         self.runner._workflow_name = 'Notice run'
         self.runner._job = jobs.create_job('notice', 'Notice run', '0.2', [])
-        self.runner._notify_completion(self.state, failed=True)
+        jobs.complete_job(self.runner._job, [])
+        bpy.ops.atlas.refresh_job_history()
         self.assertFalse(self.state.job_history_detail_mode)
-        self.assertTrue(self.state.job_notices[0].failed)
-        bpy.ops.atlas.dismiss_job_notice(job_id=self.runner._job.JobId)
-        self.assertEqual(len(self.state.job_notices), 0)
-        self.assertIsNotNone(jobs.get_job(self.runner._job.JobFolderPath))
+        self.assertEqual(self.state.view_mode, 'RUN')
+        self.assertFalse(jobs.get_job(self.runner._job.JobFolderPath).Reviewed)
+        bpy.ops.atlas.select_job(job_id=self.runner._job.JobId)
+        self.assertEqual(self.state.view_mode, 'JOBS')
+        self.assertTrue(jobs.get_job(self.runner._job.JobFolderPath).Reviewed)
 
     def test_running_status_never_fabricates_percentage(self):
         self.runner._done = False
@@ -332,16 +335,11 @@ class BlenderRegressions(unittest.TestCase):
         self.runner._job = jobs.create_job('notice-toggle', 'Notice', '0.2', [])
         self.runner._workflow_name = 'Notice'
         with patch.object(ops.preferences, 'get_preferences', return_value=prefs):
-            self.runner._notify_completion(self.state)
-            self.assertEqual(len(self.state.job_notices), 0)
-            self.runner._notify_completion(self.state, failed=True)
-            self.assertEqual(len(self.state.job_notices), 1)
-            self.state.job_notices.clear()
+            self.assertFalse(ops.preferences.should_notify())
+            self.assertTrue(ops.preferences.should_notify(on_error=True))
             prefs.notify_on_complete, prefs.notify_on_error = True, False
-            self.runner._notify_completion(self.state, failed=True)
-            self.assertEqual(len(self.state.job_notices), 0)
-            self.runner._notify_completion(self.state)
-            self.assertEqual(len(self.state.job_notices), 1)
+            self.assertFalse(ops.preferences.should_notify(on_error=True))
+            self.assertTrue(ops.preferences.should_notify())
 
     def test_verbose_logging_controls_only_atlas_and_does_not_duplicate_handlers(self):
         prefs = SimpleNamespace(verbose_logging=False)
@@ -431,7 +429,99 @@ class BlenderRegressions(unittest.TestCase):
         self.assertIn('copy destination unavailable', saved.ErrorMessage)
         self.assertEqual(saved.OutputsSnapshot[0]['StringValue'], 'preserved result')
         self.assertEqual(Path(saved.OutputsSnapshot[1]['FilePath']).read_bytes(), png.read_bytes())
-        self.assertEqual(len(self.state.job_notices), 0)
+        self.assertEqual(self.state.view_mode, 'RUN')
+
+    def iteration_definition(self, origin='https://one.invalid'):
+        return ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='iteration',
+            base_url=origin, name='Iteration', inputs=[
+                dict(id='text', type='string', default_value='default'),
+                dict(id='flag', type='boolean'),
+                dict(id='images', type='image', isArray=True),
+            ], outputs=[dict(id='result', type='image')]))
+
+    def test_workflow_drafts_preserve_mixed_arrays_and_isolate_environments(self):
+        definition = self.iteration_definition()
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        self.state.inputs[0].string_value = 'keep my edits'
+        self.state.inputs[1].provided = False
+        for source, value in [('FILE', '//a.png'), ('ASSET', 'original-id'), ('SCENE', 'BlenderImage')]:
+            item = self.state.inputs[2].asset_items.add()
+            item.source_type = source
+            item.file_path, item.asset_id, item.image_name = value, value, value
+        expected = state_module.capture_input_values(self.state)
+        state_module.populate_state_from_definition(bpy.context, self.state,
+                                                    self.iteration_definition('https://two.invalid'))
+        self.assertEqual(self.state.inputs[0].string_value, 'default')
+        self.state.inputs[0].string_value = 'other environment'
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        self.assertEqual(state_module.capture_input_values(self.state), expected)
+        updated = definition.to_dict()
+        updated['inputs'][0] = dict(id='text', type='number', default_value=7)
+        updated['inputs'].append(dict(id='new', type='string', default_value='new default'))
+        state_module.populate_state_from_definition(bpy.context, self.state,
+                                                    ops.WorkflowDefinition.from_dict(updated))
+        self.assertEqual(self.state.inputs[0].number_value, 7)
+        self.assertEqual(self.state.inputs[-1].string_value, 'new default')
+        self.assertEqual(len(self.state.inputs[2].asset_items), 3)
+
+    def test_restore_run_inputs_uses_original_assets_or_explicit_current_sources(self):
+        definition = self.iteration_definition()
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        self.state.inputs[0].string_value = 'historical prompt'
+        self.state.inputs[1].provided = False
+        entry = self.state.inputs[2].asset_items.add()
+        entry.source_type, entry.image_name = 'SCENE', 'HistoricalImage'
+        job = jobs.create_job('iteration', 'Iteration', '0.2', [], workflow_snapshot=definition.to_dict(),
+                              input_draft=state_module.capture_input_values(self.state))
+        job.SubmittedInputs = {'text': 'historical prompt', 'images': ['uploaded-image-id']}
+        job.save()
+        self.workflow('unrelated')
+        self.assertEqual(bpy.ops.atlas.use_job_inputs(job_folder_path=job.JobFolderPath), {'FINISHED'})
+        self.assertEqual(self.state.base_url, 'https://one.invalid')
+        self.assertEqual(self.state.inputs[0].string_value, 'historical prompt')
+        self.assertFalse(self.state.inputs[1].provided)
+        entry = self.state.inputs[2].asset_items[0]
+        self.assertEqual((entry.source_type, entry.asset_id), ('ASSET', 'uploaded-image-id'))
+        self.assertEqual(self.state.view_mode, 'RUN')
+        self.assertEqual(bpy.ops.atlas.use_job_inputs(job_folder_path=job.JobFolderPath,
+                                                    source_mode='CURRENT'), {'FINISHED'})
+        self.assertEqual(self.state.inputs[2].asset_items[0].source_type, 'SCENE')
+        self.assertEqual(self.state.inputs[2].asset_items[0].image_name, 'HistoricalImage')
+        before = state_module.capture_input_values(self.state)
+        job.SubmittedInputs = {}
+        job.save()
+        self.assertEqual(bpy.ops.atlas.use_job_inputs(job_folder_path=job.JobFolderPath), {'CANCELLED'})
+        self.assertEqual(state_module.capture_input_values(self.state), before)
+
+    def test_run_labels_numbers_and_legacy_review_state(self):
+        job = jobs.create_job('labels', 'Labels', '0.2', [])
+        jobs.complete_job(job, [dict(ParamType='image', Items=[dict(FilePath='one.png'),
+                                                            dict(FilePath='two.png')])])
+        self.assertEqual(jobs.result_summary(job), '2 images')
+        bpy.ops.atlas.rename_job(job_folder_path=job.JobFolderPath, label='Preferred variation')
+        saved = jobs.get_job(job.JobFolderPath)
+        self.assertEqual(saved.UserLabel, 'Preferred variation')
+        number = saved.RunNumber
+        self.assertTrue(jobs.delete_job(saved))
+        next_job = jobs.create_job('labels', 'Labels', '0.2', [])
+        self.assertGreater(next_job.RunNumber, number)
+        legacy = next_job.to_dict()
+        for key in ('Reviewed', 'RunNumber', 'WorkflowSnapshot', 'InputDraft', 'SubmittedInputs', 'UserLabel'):
+            del legacy[key]
+        self.assertTrue(jobs.JobRecord.from_dict(legacy).Reviewed)
+        self.assertEqual(jobs.JobRecord.from_dict(legacy).RunNumber, 0)
+
+    def test_image_preview_does_not_change_scene_and_plane_is_explicit(self):
+        path = str(self.root / 'non-destructive-preview.png')
+        ops._save_image_as_png(self.image(), path)
+        objects, materials, images = set(bpy.data.objects), set(bpy.data.materials), set(bpy.data.images)
+        self.assertEqual(bpy.ops.atlas.view_job_output_image(file_path=path), {'FINISHED'})
+        self.assertEqual(set(bpy.data.objects), objects)
+        self.assertEqual(set(bpy.data.materials), materials)
+        self.assertEqual(set(bpy.data.images), images)
+        self.assertIsNotNone(ops.get_image_preview(path))
+        self.assertEqual(bpy.ops.atlas.add_image_plane(file_path=path), {'FINISHED'})
+        self.assertEqual(len(set(bpy.data.objects) - objects), 1)
 
     def test_outputs_persist_after_selection_is_cleared(self):
         self.workflow('A')
@@ -633,8 +723,10 @@ class BlenderRegressions(unittest.TestCase):
             inputs=[dict(id='images', type='image', isArray=True)], outputs=[]))
         state_module.populate_state_from_definition(bpy.context, self.state, definition)
         records = [dict(AssetId=f'asset-{i}', ApiOrigin=self.state.base_url) for i in range(2)]
+        self.state.view_mode = 'JOBS'
         result = bpy.ops.atlas.reuse_asset(param_type='jpeg', asset_data=json.dumps(records), target_param='images')
         self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(self.state.view_mode, 'RUN')
         items = self.state.inputs[0].asset_items
         self.assertEqual([i.asset_id for i in items], ['asset-0', 'asset-1'])
         bpy.ops.atlas.edit_asset_list(param_id='images', item_index=1, action='UP')

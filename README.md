@@ -42,8 +42,8 @@ The addon lives in Blender's 3D View sidebar under the **Atlas** tab. It handles
 - **Transfer all file types in the all-types export**, including scenes, USDZ, animation, audio, video, PDF, SVG, and agent context.
 - **Set primitive inputs** such as text prompts, numbers, and booleans.
 - **Watch execution status and elapsed time** while the job runs without freezing Blender.
-- **Review outputs later** in **Jobs History**.
-- **Bring results into the scene** by importing generated meshes, previewing generated images on planes, applying generated images as materials, and copying generated text.
+- **Review outputs later** in **Jobs**.
+- **Bring results into the scene** by importing generated meshes, adding image planes, applying generated images as materials, and copying generated text.
 - **Atlas Platform API v0.2** support with workspace API key auth, async polling, and version-aware upload/download URLs.
 
 > **Note:** You need an internet connection, a workspace API key for API v0.2+ workflows, and access to Atlas Platform. Import workflow JSON exported from Atlas Platform.
@@ -54,101 +54,87 @@ The addon lives in Blender's 3D View sidebar under the **Atlas** tab. It handles
 
 **Location:** open the 3D View sidebar with `N`, then select the **Atlas** tab.
 
-This is the main panel for one workflow at a time: pick what to run, fill in inputs, start execution, and open past results.
+One native Blender panel contains two views. **Run** prepares a workflow;
+**Jobs** holds running jobs and saved results. The shared status line shows active
+runs and new results in either view. Completion never changes your view or selection.
 
 | Area | What it is for |
 | --- | --- |
-| **Atlas Workflow Library** | Load a workflow JSON, switch between saved workflows, save the active workflow to the local library, or remove a local workflow. |
-| **Selected Workflow** | Shows the current workflow. Inputs are expanded by default; output preview is collapsed until you need it. |
-| **Inputs** | Text, number and boolean controls; file or asset-ID inputs; ordered asset lists. Images, EXR and meshes also accept Blender data. |
-| **Expected Outputs** | Names and types the workflow can return. View actual results for each run in Job History. |
-| **Run button** | Starts the selected workflow with the current inputs. The button label includes the workflow name. |
+| **Run** | Import workflow JSON, choose a saved workflow, edit inputs, and start execution. |
+| **Inputs** | Text, number and boolean controls; files, scene data and asset IDs; ordered asset lists. |
+| **Expected Outputs** | Names and types the workflow can return. Actual results belong to a run in Jobs. |
+| **Jobs** | Browse, filter and label runs, inspect results, and reuse inputs. |
+| **Shared status** | See how many jobs are running; open an unreviewed result explicitly. |
 
 <p align="center">
-  <img src="images/Blender_Atlas_Tab.png" alt="Blender sidebar with the Atlas tab selected" width="900"/>
-  <br/>
-  <em>Atlas tab in Blender's 3D View sidebar.</em>
-</p>
-
-<p align="center">
-  <img src="images/Workflow_Loaded.png" alt="Atlas Workflow Library and compact selected workflow panel" width="445"/>
-  <br/>
-  <em>Workflow loaded and ready to run.</em>
-</p>
-
-<p align="center">
-  <img src="images/Workflow_Inputs.png" alt="Workflow inputs for image, mesh, number, boolean, and text" width="418"/>
-  <br/>
-  <em>Type-aware input controls for files, scene data, and primitive values.</em>
+  <img src="images/Run_View.png" alt="Run view with compact ordered asset inputs" width="900"/>
 </p>
 
 ### Typical flow
 
-1. Click the import button in **Atlas Workflow Library**.
-2. Choose a workflow JSON exported from Atlas Platform.
-3. Select scene objects or files for image and mesh inputs.
-4. Fill in text, number, and boolean inputs.
-5. Click **Run [Workflow Name]**.
-6. Click **View Results** on the completion notice or the job's history row.
+1. In **Run**, import a workflow JSON exported from Atlas Platform.
+2. Choose scene data, files or asset IDs and fill in primitive inputs.
+3. Click **Run [Workflow Name]**.
+4. Continue editing or switch workflows. Each workflow retains its draft during this Blender session.
+5. Open **Jobs**, select the run, and click **View Results** or its arrow button.
+6. Preview, import, apply, or reuse the result as needed.
 
-Every running job has a **View in Job History** button. It selects that exact run,
-even after you switch workflows. Expand Job History's standard Blender header
-if the panel is collapsed. Completion notices stay in the library panel
-until dismissed (up to five recent notices per session); dismissing a notice keeps
-the job and results. Finishing another run does not change the job you are viewing.
-
-<p align="center">
-  <img src="images/Workflow_Running.png" alt="Running job progress in the Atlas sidebar" width="453"/>
-  <br/>
-  <em>Earlier UI shown. Running Jobs now shows execution phase and elapsed time without a percentage bar.</em>
-</p>
+Drafts keep input values, omitted fields, source choices and array order. They are
+separate for each workflow, API environment and version. They do not survive a
+Blender restart; saved runs provide input reuse after restarting.
 
 ---
 
 ## Jobs History
 
-**Location:** **3D View Sidebar (`N`) > Atlas > Job History**.
+**Location:** **3D View Sidebar (`N`) > Atlas > Jobs**.
 
-Job History is where you review current and past workflow runs. Its default position
-is above Selected Workflow, and you can reorder it using Blender's standard panel
-header. It has a compact list view and a detail view. Per-run links clear list
-filters and select that job's outputs; expand the panel if collapsed. Workflow inputs remain
-available; completion never opens or switches history automatically.
+Jobs is the permanent place to review runs. A run number and optional label help
+identify iterations. Selecting a list row shows its timestamp and result summary;
+opening it shows the full timestamp, inputs, outputs and any errors. Running job
+details show the execution phase and elapsed time.
 
-| Area | What it is for |
+New completed or failed runs remain unreviewed until opened. That state survives
+restarting Blender. Finishing another run never replaces the result you are viewing.
+Older history stays readable without making every old run appear new.
+
+| Action | What it does |
 | --- | --- |
-| **History list** | Browse previous jobs with status and relative time. |
-| **Job detail** | Inspect one job. Outputs are shown first; inputs are collapsed by default to save vertical space. |
-| **Output actions** | View or apply image outputs, import mesh outputs, copy number/text outputs, and open full text in a dialog. |
-| **Open Folder** | Opens the local job folder containing `job.json`, inputs, and downloaded outputs. |
+| **View Results / row arrow** | Opens that exact run. Explicit result links clear filters when needed. |
+| **Label Run** | Saves an optional name without changing the workflow or run ID. |
+| **Use These Inputs** | Loads the run's workflow and inputs as an editable draft; does not execute it. |
+| **Open Folder** | Opens the local job folder containing metadata, inputs and downloaded outputs. |
+
+**Use These Inputs** offers two explicit choices: original uploaded asset IDs,
+or the captured scene/file references resolved against their current contents.
+Original IDs avoid re-uploading and preserve the submitted assets. Current sources
+can differ from the original run and must still exist. This replaces the draft for
+that workflow. Older jobs without the necessary snapshot cannot offer this action.
 
 <p align="center">
-  <img src="images/Job_History_List.png" alt="Jobs History list in the Atlas Blender addon" width="633"/>
-  <br/>
-  <em>History list for completed, failed, and running jobs.</em>
+  <img src="images/Jobs_View.png" alt="Jobs view with running and completed iterations" width="900"/>
 </p>
 
 <p align="center">
-  <img src="images/Job_History_Detail.png" alt="Completed job detail with outputs first" width="397"/>
-  <br/>
-  <em>Job detail prioritizes outputs, with inputs collapsed by default.</em>
+  <img src="images/Job_Detail.png" alt="Selected run with labels, input reuse and explicit output actions" width="900"/>
 </p>
 
 ### Working with outputs
 
-- **Image > View** creates a plane with the same aspect ratio as the image, assigns a texture material, and switches supported viewports to Material Preview.
-- **Image > Apply** creates a new material from the image and assigns it to the selected object.
+- **Image > Preview** opens a popup without adding scene objects, images or materials. A small thumbnail becomes available after previewing.
+- **Image > Add Image Plane** creates a plane with the same aspect ratio as the image, assigns a texture material, and switches supported viewports to Material Preview.
+- **Image > Apply to Material** creates a new material from the image and assigns it to the selected object.
 - **Mesh > Import** imports the generated GLB into the scene.
 - **Text > View** opens the full generated text in a dialog.
 - **Copy** actions copy text or primitive values to the clipboard.
-- **Use as Input** sends an output's asset ID to a compatible input of the selected workflow, without downloading and uploading it again. For arrays, **Use All as Input** appends the IDs in order.
+- **Use as Input** sends an output's asset ID to a compatible input of the selected workflow and returns to Run, without downloading and uploading it again. For arrays, **Use All as Input** appends the IDs in order.
 - **Array outputs** offer actions for each item. **Import All Meshes** imports each asset into its own collection. Arrays stay on disk until explicitly opened; scalar auto-import preferences do not load entire arrays.
 - **Other file outputs** remain available in the job folder, with asset IDs and metadata in history. If one download fails, successful files are retained and the failed item is identified.
 
 <p align="center">
-  <img src="images/Image_Output_Actions.png" alt="Image output actions and preview plane in Blender" width="409"/>
+  <img src="images/Image_Preview.png" alt="Image preview popup without scene changes" width="900"/>
   <br/>
-  <em>Image outputs can be previewed as planes or applied as materials.</em>
+  <em>Preview first; add a plane or apply a material only when wanted.</em>
 </p>
 
 <p align="center">
@@ -222,9 +208,9 @@ Open a 3D View, press `N`, and choose the **Atlas** tab.
 
 #### Step 3: Import a workflow
 
-1. Click the import button in **Atlas Workflow Library**.
+1. Click the import button in **Run**.
 2. Choose a workflow JSON exported from Atlas Platform.
-3. The workflow appears in the library and the **Selected Workflow** panel.
+3. The workflow appears in the library and its inputs appear in **Run**.
 
 <p align="center">
   <img src="images/Workflow_Import_FilePicker.png" alt="Selecting a workflow JSON file for import" width="419"/>
@@ -256,7 +242,7 @@ Open **Edit > Preferences > Add-ons > Atlas Workflow Integration**.
 | **Storage Warning** | 500 MB | Warning threshold for local job history storage, not a hard cap. `0` disables it. |
 | **Warn** | On | Report an exceeded storage threshold when starting a run. |
 | **Manual Cleanup Age** | 0 | Starting age for the Clean Old Jobs dialog; `0` uses 30 days. Nothing is deleted automatically. |
-| **Notifications** | On | Independently enable completion/error reports and sidebar notices. Validation errors and job history remain available when muted. |
+| **Notifications** | On | Independently enable completion/error reports. New-result markers and history remain available when muted; validation errors remain visible. |
 | **Verbose Logging** | Off | Extra console output for troubleshooting. |
 
 The former **Default Output Path** setting is now **Output Copy Folder**. A custom
@@ -398,7 +384,7 @@ Runtime implementation modules are intentionally grouped under `atlas/`; `__init
 | HTTP client import fails | Reinstall the addon from a complete release zip so the bundled `vendor/` folder is included. |
 | Workflow JSON will not load | Confirm it includes the required fields and supported parameter types. |
 | Input file is missing | Re-select the image or mesh file in the input row. |
-| Image output is not visible | Use **View**; it creates a textured plane and switches supported viewports to Material Preview. |
+| Image output is not visible | Use **Preview** to inspect it, **Add Image Plane** to place it in the scene, or **Apply to Material** for the active object. |
 | Apply image does nothing | Select an object with material slots, then click **Apply** again. |
 | Mesh did not import | Confirm the output file exists in the job folder and is GLB/GLTF. |
 | Job history looks stale | Click refresh in **Jobs History** or rerun the workflow. |

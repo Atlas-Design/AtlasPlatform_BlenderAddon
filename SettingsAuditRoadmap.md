@@ -43,8 +43,8 @@ output folders receive copies; Job History keeps its own durable originals.
 | Storage Warning | `check_storage_limit`, warning threshold; no hard cap. |
 | Warn | Run submission warning report. |
 | Manual Cleanup Age | Cleanup dialog default; renamed from misleading Auto-Cleanup. |
-| Notify on Complete | Completion reports and per-job notices. Formerly unused. |
-| Notify on Error | Error reports and per-job notices; validation errors remain visible. Formerly unused. |
+| Notify on Complete | Completion reports. Formerly unused. Run/Jobs now keeps persistent new-result markers independently. |
+| Notify on Error | Error reports; validation errors remain visible. Formerly unused. New-result markers remain available when muted. |
 | Verbose Logging | Atlas-only logger configuration/update, registration and run startup. Formerly unused. |
 
 Storage actions also checked: manual age cleanup, clear finished history, and

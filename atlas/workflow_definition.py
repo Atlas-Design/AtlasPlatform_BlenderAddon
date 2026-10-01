@@ -101,6 +101,22 @@ class WorkflowDefinition:
 
     # -------- Construction helpers --------
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Portable contract snapshot, without credentials or Blender state."""
+        inputs = []
+        for param in self.inputs:
+            item = dict(id=param.id, type=getattr(param.type, 'value', param.type),
+                        label=param.label, isArray=param.is_array)
+            if param.required is not None:
+                item['required'] = param.required
+            if param.has_default:
+                item['default_value'] = param.default_value
+            inputs.append(item)
+        return dict(version=self.version, api_id=self.api_id, base_url=self.base_url,
+                    name=self.name, inputs=inputs,
+                    outputs=[dict(id=p.id, type=getattr(p.type, 'value', p.type),
+                                  format=p.format, isArray=p.is_array) for p in self.outputs])
+
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "WorkflowDefinition":
         """Create a WorkflowDefinition from a dict parsed from JSON."""

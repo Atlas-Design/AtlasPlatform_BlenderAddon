@@ -27,6 +27,7 @@ log = logging.getLogger("atlas_workflow")
 
 # --- Blender and Addon-Specific Imports ---
 import bpy
+from bpy.utils import previews as preview_utils
 from bpy.props import StringProperty, IntProperty, CollectionProperty, EnumProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
@@ -294,7 +295,11 @@ class ATLAS_OT_RefreshJobHistory(Operator):
             item.workflow_name = job.WorkflowName
             item.created_at = job.CreatedAtUtc
             item.status = job.Status
+            if any(running.job_id == job.JobId for running in state.running_jobs):
+                item.status = 1
             item.job_folder_path = job.JobFolderPath
+            item.run_number, item.user_label, item.reviewed = job.RunNumber, job.UserLabel, job.Reviewed
+            item.result_summary = job_manager.result_summary(job)
             if job.JobId == selected_id:
                 state.job_history_index = len(state.job_history) - 1
             
@@ -303,14 +308,8 @@ class ATLAS_OT_RefreshJobHistory(Operator):
                 created = datetime.fromisoformat(job.CreatedAtUtc.replace('Z', '+00:00'))
                 age = now - created
                 
-                if age.total_seconds() < 60:
-                    item.created_at_display = "just now"
-                elif age.total_seconds() < 3600:
-                    mins = int(age.total_seconds() / 60)
-                    item.created_at_display = f"{mins}m ago"
-                elif age.total_seconds() < 86400:
-                    hours = int(age.total_seconds() / 3600)
-                    item.created_at_display = f"{hours}h ago"
+                if age.total_seconds() < 86400:
+                    item.created_at_display = created.astimezone().strftime('%H:%M:%S')
                 elif age.days == 1:
                     item.created_at_display = "Yesterday"
                 elif age.days < 7:
@@ -322,6 +321,7 @@ class ATLAS_OT_RefreshJobHistory(Operator):
         
         if state.job_history_index < 0:
             state.job_history_detail_mode = False
+        state.history_loaded = True
         return {'FINISHED'}
 
 
@@ -431,10 +431,56 @@ def _set_viewports_to_material_preview(context: bpy.types.Context) -> None:
                 space.shading.type = 'MATERIAL'
 
 
+_image_previews = None
+
+
+def get_image_preview(path, load=False):
+    """Bounded, lazy thumbnail cache; no images or objects added to the scene."""
+    global _image_previews
+    if _image_previews is None:
+        if not load:
+            return None
+        _image_previews = preview_utils.new()
+    key = os.path.abspath(path)
+    if key not in _image_previews and load:
+        if len(_image_previews) >= 32:
+            _image_previews.clear()
+        _image_previews.load(key, key, 'IMAGE')
+    return _image_previews.get(key)
+
+
 class ATLAS_OT_ViewJobOutputImage(Operator):
+    """Preview an image without adding objects or materials to the scene"""
+    bl_idname = 'atlas.view_job_output_image'
+    bl_label = 'Preview Image'
+    file_path: StringProperty(subtype='FILE_PATH')
+
+    def execute(self, context):
+        try:
+            if not os.path.isfile(self.file_path):
+                raise ValueError('Image file not found')
+            get_image_preview(self.file_path, load=True)
+        except Exception as exc:
+            self.report({'ERROR'}, f'Cannot preview image: {exc}')
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        if self.execute(context) != {'FINISHED'}:
+            return {'CANCELLED'}
+        return context.window_manager.invoke_popup(self, width=520)
+
+    def draw(self, context):
+        self.layout.label(text=os.path.basename(self.file_path))
+        preview = get_image_preview(self.file_path)
+        if preview:
+            self.layout.template_icon(icon_value=preview.icon_id, scale=20.0)
+
+
+class ATLAS_OT_AddImagePlane(Operator):
     """Create a textured preview plane from a job output image."""
-    bl_idname = "atlas.view_job_output_image"
-    bl_label = "View Image"
+    bl_idname = "atlas.add_image_plane"
+    bl_label = "Add Image Plane"
     bl_options = {'REGISTER', 'UNDO'}
     
     file_path: StringProperty(
@@ -626,7 +672,7 @@ class ATLAS_OT_SelectJob(Operator):
     """View job details"""
     bl_idname = "atlas.select_job"
     bl_label = "View Job Details"
-    bl_description = "Select this run in Job History; expand the panel if it is collapsed"
+    bl_description = "Open the Jobs view and inspect this exact run"
     bl_options = {'REGISTER'}
     
     job_index: bpy.props.IntProperty(
@@ -649,25 +695,18 @@ class ATLAS_OT_SelectJob(Operator):
             state.job_history_detail_mode = True
             state.job_detail_outputs_expanded = True
             state.job_detail_inputs_expanded = False
+            state.view_mode = 'JOBS'
+            item = state.job_history[index]
+            if item.status in (2, 3, 4):
+                job = job_manager.get_job(item.job_folder_path)
+                if job:
+                    job.Reviewed = True
+                    job.save()
+                    item.reviewed = True
             redraw_view3d_ui()
         else:
             self.report({'WARNING'}, "This job is no longer available in Job History.")
             return {'CANCELLED'}
-        return {'FINISHED'}
-
-
-class ATLAS_OT_DismissJobNotice(Operator):
-    """Dismiss this notice; the run and its results remain in Job History"""
-    bl_idname = "atlas.dismiss_job_notice"
-    bl_label = "Dismiss Notification"
-    job_id: bpy.props.StringProperty()
-
-    def execute(self, context):
-        notices = context.window_manager.atlas_workflow_state.job_notices
-        for index, notice in enumerate(notices):
-            if notice.job_id == self.job_id:
-                notices.remove(index)
-                break
         return {'FINISHED'}
 
 
@@ -680,6 +719,92 @@ class ATLAS_OT_BackToJobList(Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         state = context.window_manager.atlas_workflow_state
         state.job_history_detail_mode = False
+        return {'FINISHED'}
+
+
+class ATLAS_OT_RenameJob(Operator):
+    """Give this run a label without renaming its files"""
+    bl_idname = 'atlas.rename_job'
+    bl_label = 'Label Run'
+    job_folder_path: StringProperty()
+    label: StringProperty(name='Label', maxlen=100)
+
+    def invoke(self, context, event):
+        job = job_manager.get_job(self.job_folder_path)
+        if not job:
+            return {'CANCELLED'}
+        self.label = job.UserLabel
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        self.layout.prop(self, 'label')
+
+    def execute(self, context):
+        job = job_manager.get_job(self.job_folder_path)
+        if not job:
+            return {'CANCELLED'}
+        job.UserLabel = self.label.strip()
+        job.save()
+        bpy.ops.atlas.refresh_job_history()
+        return {'FINISHED'}
+
+
+class ATLAS_OT_UseJobInputs(Operator):
+    """Restore a run's inputs into an editable draft; does not submit a run"""
+    bl_idname = 'atlas.use_job_inputs'
+    bl_label = 'Use These Inputs'
+    job_folder_path: StringProperty()
+    source_mode: EnumProperty(name='File inputs', items=[
+        ('ORIGINAL', 'Original Uploaded Assets', 'Reuse the original Atlas asset IDs, without re-uploading'),
+        ('CURRENT', 'Current Scene / Files', 'Read the current contents of the original scene and file references'),
+    ], default='ORIGINAL')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=440)
+
+    def draw(self, context):
+        self.layout.prop(self, 'source_mode', expand=True)
+        self.layout.label(text='Inputs become an editable draft. Review them before running.')
+        self.layout.label(text='This replaces the saved draft for this workflow.')
+        if self.source_mode == 'CURRENT':
+            self.layout.label(text='Scene objects and files may have changed since this run.', icon='INFO')
+
+    def execute(self, context):
+        job = job_manager.get_job(self.job_folder_path)
+        if not job or not job.WorkflowSnapshot:
+            self.report({'WARNING'}, 'This older run has no workflow snapshot; automatic input restore is unavailable.')
+            return {'CANCELLED'}
+        values = json.loads(json.dumps(job.InputDraft))
+        missing = []
+        for item in values:
+            if not item.get('provided', True) or item['param_type'] not in FILE_FORMATS:
+                continue
+            if self.source_mode == 'ORIGINAL':
+                submitted = job.SubmittedInputs.get(item['param_id'])
+                ids = submitted if item['is_array'] and isinstance(submitted, list) else [submitted]
+                entries = item['items'] if item['is_array'] else [item]
+                if len(ids) != len(entries) or any(not isinstance(fid, str) or not fid for fid in ids):
+                    missing.append(item['param_id'])
+                    continue
+                for entry, fid in zip(entries, ids):
+                    entry['source_type'], entry['asset_id'] = 'ASSET', fid
+        if missing:
+            self.report({'WARNING'}, 'Original assets were not captured for: ' + ', '.join(missing) +
+                        '. Choose Current Scene / Files explicitly to use their current contents.')
+            return {'CANCELLED'}
+        try:
+            definition = WorkflowDefinition.from_dict(job.WorkflowSnapshot)
+        except ValueError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        state = context.window_manager.atlas_workflow_state
+        populate_state_from_definition(context, state, definition)
+        atlas_workflow_state.restore_input_values(state, values)
+        atlas_workflow_state.remember_draft(state)
+        state.draft_notice = ('Original uploaded assets restored.' if self.source_mode == 'ORIGINAL' else
+                              'Current scene/file references restored; their contents may have changed.')
+        state.view_mode = 'RUN'
+        redraw_view3d_ui()
         return {'FINISHED'}
 
 
@@ -812,6 +937,8 @@ class ATLAS_OT_ReuseAsset(Operator):
             entry.source_type = 'ASSET'
             entry.asset_id = record['AssetId']
         target.provided = True
+        state.view_mode = 'RUN'
+        state.draft_notice = f'Result added to {target.label}. Review the inputs before running.'
         return {'FINISHED'}
 
 
@@ -1067,6 +1194,7 @@ class ATLAS_OT_RunWorkflow(Operator):
     _current_status: str = ""  # pending, running, completed, failed
     _import_plan: list = []  # A list of dicts describing downloaded files
     _outputs_result: dict | None = None
+    _submitted_inputs: dict | None = None
     _output_params: list | None = None
     _workflow_key: tuple | None = None
     _cancelled: bool = False
@@ -1095,6 +1223,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         4. Download output files
         """
         try:
+            self._submitted_inputs = json.loads(json.dumps(payload))
             # STAGE 1: UPLOAD FILES
             if upload_plan:
                 self._current_status = "uploading"
@@ -1105,6 +1234,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                         payload[item['param_id']] = file_id
                     else:
                         payload[item['param_id']][item['index']] = file_id
+                    self._submitted_inputs = json.loads(json.dumps(payload))
                     log.info(f"[Atlas] Uploaded {item['param_id']}: {file_id}")
 
             # STAGE 2: EXECUTE WORKFLOW (ASYNC)
@@ -1267,6 +1397,8 @@ class ATLAS_OT_RunWorkflow(Operator):
                 workflow_version=state.version,
                 inputs_snapshot=inputs_snapshot,
                 output_copy_root=output_copy_root,
+                workflow_snapshot=json.loads(state.active_definition_json) if state.active_definition_json else {},
+                input_draft=atlas_workflow_state.capture_input_values(state, resolve_paths=True),
             )
         except Exception as exc:
             release_job_temp_dir(self._temp_dir)
@@ -1283,6 +1415,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._error_node_id = None
         self._import_plan = []
         self._outputs_result = None
+        self._submitted_inputs = None
         self._status_message = "Initializing..."
         self._current_status = "initializing"
         self._start_time = time.time()
@@ -1319,7 +1452,8 @@ class ATLAS_OT_RunWorkflow(Operator):
         # Start the modal timer to check for thread completion
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
         context.window_manager.modal_handler_add(self)
-        self.report({'INFO'}, f"{self._workflow_name}: Run started. View in Job History from Running Jobs.")
+        bpy.ops.atlas.refresh_job_history()
+        self.report({'INFO'}, f"{self._workflow_name}: Run started. Follow it in Jobs.")
         
         log.info(f"[Atlas] Started workflow execution: {state.active_name}")
         return {'RUNNING_MODAL'}
@@ -1335,6 +1469,12 @@ class ATLAS_OT_RunWorkflow(Operator):
         state = context.window_manager.atlas_workflow_state
 
         if self._done:
+            if self._job:
+                self._job.SubmittedInputs = self._submitted_inputs or {}
+                # Preserve labels changed while the worker was running.
+                stored = job_manager.get_job(self._job.JobFolderPath)
+                if stored:
+                    self._job.UserLabel = stored.UserLabel
             # --- JOB FINISHED ---
             wm = context.window_manager
             wm.event_timer_remove(self._timer)
@@ -1368,7 +1508,6 @@ class ATLAS_OT_RunWorkflow(Operator):
                 
                 # Refresh job history so failed job appears
                 bpy.ops.atlas.refresh_job_history()
-                self._notify_completion(state, failed=True)
                 
                 redraw_view3d_ui()
                 release_job_temp_dir(self._temp_dir)
@@ -1392,7 +1531,6 @@ class ATLAS_OT_RunWorkflow(Operator):
                 if preferences.should_notify(context, on_error=True):
                     self.report({'ERROR'}, f"{self._workflow_name}: Could not save results: {exc}")
                 bpy.ops.atlas.refresh_job_history()
-                self._notify_completion(state, failed=True)
                 redraw_view3d_ui()
                 return {'CANCELLED'}
             finally:
@@ -1407,7 +1545,6 @@ class ATLAS_OT_RunWorkflow(Operator):
             
             # Refresh job history so completed job appears
             bpy.ops.atlas.refresh_job_history()
-            self._notify_completion(state, failed=bool(self._error))
             
             redraw_view3d_ui()
             return {'CANCELLED'} if self._error else {'FINISHED'}
@@ -1444,18 +1581,6 @@ class ATLAS_OT_RunWorkflow(Operator):
         log.info(f"[Atlas] Workflow {self._workflow_name} cancelled by user")
         # Note: The background thread is not forcefully stopped, but it will
         # complete without affecting the Blender state further.
-
-    def _notify_completion(self, state, failed=False):
-        """Leave navigation to the user; each notice belongs to one run."""
-        if not self._job or not preferences.should_notify(on_error=failed):
-            return
-        # Bound sidebar space; older runs always remain available in history.
-        if len(state.job_notices) >= 5:
-            state.job_notices.remove(0)
-        notice = state.job_notices.add()
-        notice.job_id = self._job.JobId
-        notice.workflow_name = self._workflow_name
-        notice.failed = failed
 
     def _update_running_job(self, state, status: str, elapsed: str, phase: str):
         """Update this job's entry in the running_jobs collection."""
@@ -1772,13 +1897,15 @@ classes = (
     ATLAS_OT_RefreshJobHistory,
     ATLAS_OT_OpenJobFolder,
     ATLAS_OT_ViewJobOutputImage,
+    ATLAS_OT_AddImagePlane,
+    ATLAS_OT_RenameJob,
+    ATLAS_OT_UseJobInputs,
     ATLAS_OT_ApplyJobOutputImage,
     ATLAS_OT_ImportJobOutputMesh,
     ATLAS_OT_OpenPreferences,
     ATLAS_OT_CopyToClipboard,
     ATLAS_OT_ViewTextOutput,
     ATLAS_OT_SelectJob,
-    ATLAS_OT_DismissJobNotice,
     ATLAS_OT_BackToJobList,
 )
 
@@ -1791,6 +1918,10 @@ def register():
 
 def unregister():
     """Unregisters all operator classes from Blender."""
+    global _image_previews
+    if _image_previews is not None:
+        preview_utils.remove(_image_previews)
+        _image_previews = None
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 

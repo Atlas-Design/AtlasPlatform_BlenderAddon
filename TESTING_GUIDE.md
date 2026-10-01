@@ -1,6 +1,6 @@
 # Atlas Blender addon — release testing guide
 
-Prepared 2026-09-29 for the expanded API types and native Blender adapters.
+Updated 2026-09-30 for API types, native adapters, settings and the Run/Jobs experience.
 
 ## 1. What is left
 
@@ -9,7 +9,7 @@ The five planned implementation phases are complete. This is **not yet a release
 | Area | Evidence already obtained | Remaining release work |
 | --- | --- | --- |
 | Parser and HTTP transport | 12 automated checks passed | Rerun against the final source revision after fixes. |
-| Blender behavior | 27 checks passed independently in Blender 4.0.2 and 5.1 | Interactive dialogs, file pickers, appearance, undo, realistic projects, and the installed ZIP. |
+| Blender behavior | 43 checks passed independently in Blender 4.0.2 and 5.1 | Interactive dialogs, file pickers, appearance, undo, realistic projects, and the installed ZIP. |
 | Live API | Three executions of the supplied dev workflow returned all 21 output parameters; one run reused returned UUIDs without uploading again | A run through the installed addon's UI; explicit optional/default cases; denied/missing asset cases. |
 | File formats | Live testing found and fixed missing upload MIME and incorrect download extensions | Inspect actual output content and native actions in the final candidate. |
 | Asset-object responses | Local fixtures cover objects with `fid`, URLs and metadata | Verify against a deployment or controlled test endpoint that actually returns this shape. The tested dev endpoint returned legacy UUID strings. |
@@ -17,15 +17,12 @@ The five planned implementation phases are complete. This is **not yet a release
 | Package and upgrade | Source layout registered in automated Blender tests | Build/install the exact ZIP; restart; disable/re-enable; upgrade with existing history and library. |
 | Delivery | Changes currently exist locally | Review fixes, choose/update release version, commit locally, build final ZIP and approve release. |
 
-The API update validation covered **39 distinct automated checks**: 27 Blender
-checks on two versions, plus 12 parser/transport checks. The results UX update
-added four base regressions; all **22 base checks** passed on Blender 4.0.2 and
-5.1. The settings audit adds eight further base checks for a total of 30. The
-native suite now inherits these 30 and contains 39 checks in total. All 30 base
-checks passed on both Blender versions on 2026-09-30, and all 12 parser/transport
-checks passed again after the settings changes.
-Running both Blender scripts repeats the base checks. Rerun the full suites on
-the final release candidate.
+The current suites contain **55 distinct automated checks**: 43 Blender checks
+(including 34 base regressions) and 12 parser/transport checks. The native suite
+passes on Blender 4.0.2 and 5.1. Running the base suite separately repeats its checks.
+Native GUI smoke captures also exercise Run, Jobs, job detail and the image popup
+using synthetic local results. This is source-level evidence; installation, realistic
+assets, interactive input, undo and upgrade acceptance still require the candidate ZIP.
 
 All manual cases below are **unexecuted acceptance criteria** unless a result is recorded for a particular candidate. Automated coverage does not mark the corresponding manual case passed.
 
@@ -127,7 +124,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Blender 5.1 tests failed' }
 git diff --check
 ```
 
-Expected: 12 parser/transport tests and 27 Blender tests in each version, all `OK`, with successful exit codes. Some negative tests deliberately produce error-level Blender reports. Judge the test result and exit code rather than failing a log simply because it contains the word `Error`.
+Expected: 12 parser/transport tests and 43 Blender tests in each version, all `OK`, with successful exit codes. Some negative tests deliberately produce error-level Blender reports. Judge the test result and exit code rather than failing a log simply because it contains the word `Error`.
 
 These tests use isolated temporary files and simulated transport. They do not install the release ZIP or verify an interactive popup. The explicit live script in section 17 makes real API calls.
 
@@ -232,7 +229,7 @@ For all file outputs, check the folder action, file existence/size, asset-ID cop
 | `number_output` | Number | Display/copy value; compare to graph. |
 | `boolean_output` | Boolean | Correct Yes/No display. |
 | `text_output` | String | Full-text View and Copy, including Unicode. |
-| `image_output` | PNG/image | View plane and Apply material. |
+| `image_output` | PNG/image | Preview, Add Image Plane and Apply to Material. |
 | `jpeg_output` | JPEG | Decodes, correct dimensions and colors. |
 | `webp_output` | WebP | Decodes; alpha where present. |
 | `tga_output` | TGA | Decodes; image is not flipped unexpectedly. |
@@ -299,10 +296,10 @@ RESP-02 is still a deployment-level gap if your endpoint only returns UUIDs. The
 
 | ID | Procedure | Expected result |
 | --- | --- | --- |
-| IMG-01 | View a nonsquare result with alpha. | Plane aspect ratio matches; texture/alpha are correct; supported viewports switch to Material Preview. |
+| IMG-01 | Preview a nonsquare result with alpha; then explicitly Add Image Plane. | Preview adds no objects/materials/image datablocks. Explicit plane creation preserves aspect ratio and texture/alpha; supported viewports switch to Material Preview. |
 | IMG-02 | Apply to a selected object whose faces use its active material slot. Repeat with no material slots. | The visible material changes appropriately; a new slot is created where needed. |
 | IMG-03 | Apply with no active object or an unsuitable active object. | Clear error; no unrelated object is altered. |
-| IMG-04 | View/apply every raster row in the output matrix. | Correct decoding/colors/dimensions. Corrupt files fail clearly and remain available for inspection. |
+| IMG-04 | Preview/add plane/apply every raster row in the output matrix. | Correct decoding/colors/dimensions. Corrupt files fail clearly and remain available for inspection. |
 | IMG-05 | Compare AVIF behavior between 4.0 and 5.1. | 4.0 explains the preview limitation but offers file/reuse actions; 5.1 offers working image actions. |
 | EXR-01 | Upload from a float image containing values `4.0`, `2.0`, `0.5`, alpha `0.75`; inspect numerical values after round trip. | Values above 1 and alpha survive within reasonable export precision; visual appearance alone is not sufficient evidence. |
 | EXR-02 | Change scene view transform, exposure and output format before EXR export. | Scene settings stay unchanged; EXR export does not bake the display transform. |
@@ -455,24 +452,27 @@ Limits of this helper: it does not click UI controls, test the installed ZIP, as
 
 ## 17a. Results discovery and execution status
 
-These are interactive acceptance cases for the results UX update. Execute in both
-Blender versions with a narrow and a widened sidebar. They remain unexecuted.
+These are installed-candidate acceptance cases. Execute in both Blender versions
+with narrow and widened sidebars. Source-level regressions and synthetic native GUI
+captures cover parts of these cases; they do not replace the installed-candidate pass.
 
 | ID | Steps | Expected |
 | --- | --- | --- |
-| UX-01 | Load a workflow; collapse and expand Expected Outputs before running it. | Preview describes names/types using labels; the note points to Job History even when collapsed. It has no result actions. |
-| UX-02 | Start workflow A, switch to B and edit its inputs, then click A's View in Job History. Expand Job History if collapsed. | History selects A. B's input values and selection remain intact. |
-| UX-03 | Close history and apply filters that exclude A; click A's running-job link, then expand the native panel header. | History shows A with Outputs expanded, Inputs collapsed and filters cleared. Native collapse state remains under user control. |
-| UX-04 | Complete B while inspecting A's history detail. | A stays selected. A separate B completion notice offers View Results; no automatic navigation occurs. |
-| UX-05 | Complete two runs of the same workflow out of order; click each notice and history action. | Each link opens its exact run and matching outputs, independent of list order or matching names. |
-| UX-06 | Click View Results and use the relevant View, Import, Open or Save actions. | Actions are visible under the selected job's expanded Outputs and affect that job's files. |
-| UX-07 | Dismiss a completion notice, refresh history, restart Blender. | Only the session notice disappears. The job and saved results remain accessible in history. |
-| UX-08 | Observe a long upload, queued job, running job and download. | Activity icon, truthful phase and increasing elapsed time; no simulated percentage or repeating fill bar. Job details also show the current status. |
-| UX-09 | Trigger a failed run and a partial download failure. | A Needs attention notice opens the failed job, error details and any saved partial results. |
-| UX-10 | While editing B, let A finish with history collapsed. | B's controls stay available, history stays collapsed, and A's notice appears without stealing focus. |
-| UX-11 | Finish more than five runs, then dismiss a notice. | At most five recent session notices; all jobs remain in history. Dismissing one does not dismiss the others. |
-| UX-12 | Remove a test job folder externally, then click its old notice. | A clear unavailable-job warning; no unrelated job is opened. |
-| UX-13 | Collapse, expand and drag Job History among the other Atlas panels. | Standard Blender header and panel appearance; normal drag reordering. No custom outer disclosure replaces the native header. |
+| UX-01 | Switch Run/Jobs; collapse and expand Expected Outputs. | One native Atlas header, clear view buttons and shared status. Expected Outputs describes names/types and points to Jobs. |
+| UX-02 | Edit A with mixed arrays, omitted fields and primitive values; switch to B, edit it, return to A. | Each workflow restores its own draft, order and source choices. Different API environments stay separate. |
+| UX-03 | Filter Jobs to exclude A; click the shared new-result link for A. | Opens exactly A, clears filters and expands Outputs. No unrelated run opens. |
+| UX-04 | Complete B while inspecting A or editing a Run draft. | Selection, view and draft remain unchanged. New-result count increases. |
+| UX-05 | Complete two runs of the same workflow out of order; open each. | Distinct run numbers, exact timestamps and matching outputs identify each iteration. |
+| UX-06 | Preview a result, then explicitly Add Image Plane or Apply to Material. | Preview only opens a popup; scene mutations happen only through the explicit scene actions. |
+| UX-07 | Leave completed results unopened, restart and refresh; open one. | New-result markers persist, then clear for the opened run. Existing pre-upgrade history is not all marked new. |
+| UX-08 | Observe upload, queue, execution and download. | Running count and elapsed time remain useful; details show truthful phase without simulated percentage. |
+| UX-09 | Fail a run, including partial downloads, while notifications are muted. | New-result marker and Jobs still expose the error and successful partial results. Reports honor preferences. |
+| UX-10 | Label a running job and let it complete; restart. | Label survives completion and reload. Workflow identity and saved files are unchanged. |
+| UX-11 | Use These Inputs with Original assets, then Current sources. | Original restores submitted asset IDs, order and omission; Current restores scene/file references. Draft is editable, never automatically executed. |
+| UX-12 | Reuse a legacy job without snapshots or a failed upload with missing IDs. | Legacy action is unavailable; incomplete Original restoration fails clearly without changing the draft. Current sources remains explicit. |
+| UX-13 | Collapse/expand Atlas and reorder it alongside another native panel where available. | Standard Blender header and background, without a transparent headerless panel. |
+| UX-14 | Use as Input / Use All as Input from an output. | Returns to Run with compatible IDs assigned/appended in order. Different API origins are rejected. |
+| UX-15 | Load a changed workflow definition after editing its draft. | Compatible fields restore; new or changed-type fields retain the new definition's defaults. |
 
 ## 17b. Settings audit
 
@@ -487,7 +487,7 @@ by the automated checks.
 | SET-03 | Start A with folder X; change to Y and start B. Finish out of order. | A copies to X, B to Y, with distinct run folders. Changing the preference does not migrate existing files. |
 | SET-04 | Try an unwritable folder, a path to a file, an ordinary relative path, and a // path in an unsaved blend. | Clear preflight error before remote execution. A // path works relative to a saved blend. Copy destinations inside history storage are rejected. |
 | SET-05 | Make the copy destination unavailable after submission. | Saved originals and history remain usable. The job records the copy error; an error notice appears only when enabled. |
-| SET-06 | Disable success notifications, then error notifications, and trigger the corresponding outcomes. | Each toggle independently controls completion reports and sidebar notices. History still shows outcomes; input validation errors are not hidden. |
+| SET-06 | Disable success notifications, then error notifications, and trigger the corresponding outcomes. | Each toggle independently controls completion reports. Persistent new-result markers remain available. History still shows outcomes; input validation errors are not hidden. |
 | SET-07 | Toggle Verbose Logging on/off and restart with each setting saved. | Atlas debug messages appear only when enabled, with no duplicate handlers/messages. Other addons' logging is unaffected. Request payload contents are not logged. |
 | SET-08 | Set a low Storage Warning threshold; toggle Warn; try zero. | A warning on submission only when enabled and exceeded. Runs are never blocked by this threshold; zero disables it. Export copies are outside usage totals. |
 | SET-09 | Set Manual Cleanup Age without pressing Clean Old Jobs. Then open its dialog and cancel. | No automatic deletion. The dialog starts at the configured age, or 30 days for zero. Cancellation keeps all files. |

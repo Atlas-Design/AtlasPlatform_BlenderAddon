@@ -24,6 +24,8 @@ import os
 import shutil
 import uuid
 import logging
+import threading
+import tempfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -31,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 log = logging.getLogger("atlas_workflow")
+_counter_lock = threading.Lock()
 
 
 def get_addon_root_dir() -> str:
@@ -129,6 +132,12 @@ class JobRecord:
     # --- File System ---
     JobFolderPath: str = ""
     OutputCopyFolder: str = ""
+    RunNumber: int = 0
+    UserLabel: str = ""
+    Reviewed: bool = True  # Existing histories do not all become unread on upgrade.
+    WorkflowSnapshot: Dict[str, Any] = field(default_factory=dict)
+    InputDraft: List[Dict[str, Any]] = field(default_factory=list)
+    SubmittedInputs: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -145,8 +154,17 @@ class JobRecord:
             raise ValueError("JobFolderPath not set")
         
         job_file = os.path.join(self.JobFolderPath, "job.json")
-        with open(job_file, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        # Readers may redraw while a job record is updated.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.JobFolderPath,
+                                             prefix='.job-', suffix='.tmp', delete=False) as f:
+                temporary = f.name
+                json.dump(self.to_dict(), f, indent=2)
+            os.replace(temporary, job_file)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
         
         log.debug(f"[Atlas Jobs] Saved job {self.JobId[:8]} to {job_file}")
 
@@ -194,6 +212,8 @@ def create_job(
     workflow_version: str,
     inputs_snapshot: List[ParamSnapshot],
     output_copy_root: str = "",
+    workflow_snapshot: Optional[Dict[str, Any]] = None,
+    input_draft: Optional[List[Dict[str, Any]]] = None,
 ) -> JobRecord:
     """
     Create a new job record and folder structure.
@@ -220,6 +240,15 @@ def create_job(
     
     # Build folder path: atlas_jobs/{workflow_name}/{timestamp}_{job_id_short}/
     jobs_root = get_jobs_root_dir()
+    with _counter_lock:
+        counter_path = os.path.join(jobs_root, '.run-counter')
+        try:
+            with open(counter_path, encoding='utf-8') as counter:
+                run_number = int(counter.read()) + 1
+        except (FileNotFoundError, ValueError):
+            run_number = max((job.RunNumber for job in get_all_jobs()), default=0) + 1
+        with open(counter_path, 'w', encoding='utf-8') as counter:
+            counter.write(str(run_number))
     workflow_folder = os.path.join(jobs_root, _sanitize_folder_name(workflow_name))
     job_folder_name = f"{timestamp}_{job_id_short}"
     job_folder = os.path.join(workflow_folder, job_folder_name)
@@ -252,6 +281,10 @@ def create_job(
         OutputsSnapshot=[],
         JobFolderPath=job_folder,
         OutputCopyFolder=copy_folder,
+        RunNumber=run_number,
+        Reviewed=False,
+        WorkflowSnapshot=workflow_snapshot or {},
+        InputDraft=input_draft or [],
     )
     
     # Save initial state
@@ -426,6 +459,23 @@ def export_output_copies(job: JobRecord) -> None:
                 errors.append(f'{os.path.basename(source)}: {exc}')
     if errors:
         raise OSError('Output copy failed; originals are safe in Job History. ' + '; '.join(errors))
+
+
+def result_summary(job: JobRecord) -> str:
+    counts = {}
+    images = {'image', 'exr', 'jpeg', 'webp', 'tga', 'tiff', 'avif'}
+    for output in job.OutputsSnapshot:
+        kind = output.get('ParamType')
+        if kind in {'boolean', 'string', 'number'}:
+            key, amount = 'value', 1
+        else:
+            key = 'image' if kind in images else ('mesh' if kind == 'mesh' else 'file')
+            entries = output.get('Items') or [output]
+            amount = sum(bool(item.get('FilePath')) for item in entries)
+        counts[key] = counts.get(key, 0) + amount
+    plural = {'image': 'images', 'mesh': 'meshes', 'file': 'files', 'value': 'values'}
+    return ' · '.join(f'{amount} {key if amount == 1 else plural[key]}'
+                      for key, amount in counts.items() if amount) or 'No saved results'
 
 
 # ---------------------------------------------------------------------------

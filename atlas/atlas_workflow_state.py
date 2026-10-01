@@ -19,6 +19,7 @@ WorkflowDefinition.
 """
 import os
 import logging
+import json
 
 import bpy
 from bpy.props import (
@@ -64,6 +65,10 @@ class AtlasJobHistoryItem(PropertyGroup):
     Lightweight summary data loaded from job.json files.
     """
     job_id: StringProperty(name="Job ID")
+    run_number: IntProperty()
+    user_label: StringProperty()
+    reviewed: BoolProperty(default=True)
+    result_summary: StringProperty()
     workflow_name: StringProperty(name="Workflow Name")
     created_at: StringProperty(name="Created At")  # ISO format for sorting
     created_at_display: StringProperty(name="Display Time")  # "just now", "5m ago", etc.
@@ -84,13 +89,6 @@ class AtlasJobHistoryItem(PropertyGroup):
         """Return status as string."""
         names = {0: "Pending", 1: "Running", 2: "Completed", 3: "Failed", 4: "Cancelled"}
         return names.get(self.status, "Unknown")
-
-
-class AtlasJobNoticeItem(PropertyGroup):
-    """Dismissible session notice pointing to one persisted job."""
-    job_id: StringProperty()
-    workflow_name: StringProperty()
-    failed: BoolProperty(default=False)
 
 
 class AtlasRunningJobItem(PropertyGroup):
@@ -230,6 +228,12 @@ class AtlasWorkflowState(PropertyGroup):
     active_name: StringProperty()
     base_url: StringProperty()
     version: StringProperty()
+    view_mode: EnumProperty(name="View", items=[('RUN', 'Run', 'Prepare a workflow'),
+                                               ('JOBS', 'Jobs', 'Review runs and results')], default='RUN')
+    workflow_drafts_json: StringProperty(default='{}', options={'HIDDEN', 'SKIP_SAVE'})
+    active_definition_json: StringProperty(default='', options={'HIDDEN'})
+    draft_notice: StringProperty(default='')
+    history_loaded: BoolProperty(default=False, options={'SKIP_SAVE'})
 
     # --- Parameter Collections ---
     inputs: CollectionProperty(
@@ -246,7 +250,6 @@ class AtlasWorkflowState(PropertyGroup):
         type=AtlasRunningJobItem,
         description="Collection of currently running jobs"
     )
-    job_notices: CollectionProperty(type=AtlasJobNoticeItem)
     
     # --- Job History ---
     job_history: CollectionProperty(
@@ -412,6 +415,54 @@ class AtlasWorkflowState(PropertyGroup):
 # --- State Management Functions ---
 # -------------------------------------------------------------------
 
+_VALUE_FIELDS = ('provided', 'source_type', 'file_path', 'asset_id', 'image_name',
+                 'mesh_name', 'frame_start', 'frame_end', 'bool_value', 'number_value',
+                 'int_value', 'string_value')
+
+
+def capture_input_values(state, resolve_paths=False):
+    result = []
+    for param in state.inputs:
+        item = {name: getattr(param, name) for name in _VALUE_FIELDS}
+        item.update(param_id=param.param_id, param_type=param.param_type, is_array=param.is_array,
+                    items=[{name: getattr(entry, name) for name in _VALUE_FIELDS if hasattr(entry, name)}
+                           for entry in param.asset_items])
+        if resolve_paths:
+            for entry in item['items'] if param.is_array else [item]:
+                if entry.get('file_path'):
+                    entry['file_path'] = bpy.path.abspath(entry['file_path'])
+        result.append(item)
+    return result
+
+
+def restore_input_values(state, values):
+    """Restore only schema-compatible fields, retaining defaults for new inputs."""
+    by_id = {item['param_id']: item for item in values}
+    for param in state.inputs:
+        item = by_id.get(param.param_id)
+        if not item or (item['param_type'], item['is_array']) != (param.param_type, param.is_array):
+            continue
+        for name in _VALUE_FIELDS:
+            if name in item:
+                setattr(param, name, item[name])
+        param.asset_items.clear()
+        for entry_values in item.get('items', []):
+            entry = param.asset_items.add()
+            for name, value in entry_values.items():
+                if name in _VALUE_FIELDS and hasattr(entry, name):
+                    setattr(entry, name, value)
+
+
+def _draft_key(state):
+    return json.dumps([state.base_url.rstrip('/'), state.active_api_id, state.version])
+
+
+def remember_draft(state):
+    if state.active_api_id:
+        drafts = json.loads(state.workflow_drafts_json)
+        drafts[_draft_key(state)] = capture_input_values(state)
+        state.workflow_drafts_json = json.dumps(drafts)
+
 def clear_workflow_state(state: AtlasWorkflowState) -> None:
     """
     Resets the workflow state to its default (empty) values.
@@ -419,12 +470,15 @@ def clear_workflow_state(state: AtlasWorkflowState) -> None:
     Args:
         state: The AtlasWorkflowState instance to clear.
     """
+    remember_draft(state)
     state.inputs.clear()
     state.outputs.clear()
     state.active_api_id = ""
     state.active_name = ""
     state.base_url = ""
     state.version = ""
+    state.active_definition_json = ''
+    state.draft_notice = ''
     state.job_running = bool(state.running_jobs)
     state.job_status = ""
     state.job_progress = 0.0
@@ -457,6 +511,8 @@ def populate_state_from_definition(
     state.active_name = wf.name
     state.base_url = wf.base_url
     state.version = wf.version
+    state.active_definition_json = json.dumps(wf.to_dict())
+    state.view_mode = 'RUN'
 
     # --- Track the source file and savable status ---
     state.active_workflow_filepath = source_filepath
@@ -503,6 +559,10 @@ def populate_state_from_definition(
                 item.source_type = 'ASSET'
                 item.asset_id = default
 
+    draft = json.loads(state.workflow_drafts_json).get(_draft_key(state))
+    if draft is not None:
+        restore_input_values(state, draft)
+
     # Create output parameter placeholders
     for p in wf.outputs:
         item = state.outputs.add()
@@ -519,7 +579,6 @@ def populate_state_from_definition(
 
 classes = (
     AtlasJobHistoryItem,  # Must be registered before AtlasWorkflowState
-    AtlasJobNoticeItem,
     AtlasRunningJobItem,  # Must be registered before AtlasWorkflowState
     AtlasAssetInputItem,
     AtlasWorkflowParamState,
