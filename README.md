@@ -79,6 +79,10 @@ runs and new results in either view. Completion never changes your view or selec
 5. Open **Jobs**, select the run, and click **View Results** or its arrow button.
 6. Preview, import, apply, or reuse the result as needed.
 
+After starting a run, a persistent confirmation beside the Run button shows its
+number, workflow, current phase and elapsed time, with a **View Job** link. You
+can keep editing or launch another run; completion does not switch views.
+
 Drafts keep input values, omitted fields, source choices and array order. They are
 separate for each workflow, API environment and version. They do not survive a
 Blender restart; saved runs provide input reuse after restarting.
@@ -101,9 +105,25 @@ Older history stays readable without making every old run appear new.
 | Action | What it does |
 | --- | --- |
 | **View Results / row arrow** | Opens that exact run. Explicit result links clear filters when needed. |
+| **Delete Run** | Removes one finished run and its local files after confirmation. Output copies and remote assets remain. |
+| **Stop Tracking** | Stops following an active run locally; does not cancel it on Atlas. |
 | **Label Run** | Saves an optional name without changing the workflow or run ID. |
 | **Use These Inputs** | Loads the run's workflow and inputs as an editable draft; does not execute it. |
 | **Open Folder** | Opens the local job folder containing metadata, inputs and downloaded outputs. |
+
+To stop following a run, select it in **Jobs** and choose **Stop Tracking** from
+the list or detail view. The confirmation explains that **remote processing and
+charges may continue**. Blender waits for any in-flight HTTP request to return,
+then stops further uploads, submission, polling and downloads. While waiting,
+the run shows **Stopping** and cannot be deleted. With request timeouts disabled,
+that wait can be indefinite if the server never responds.
+
+The saved status is **Tracking stopped**, separate from a server cancellation.
+Already downloaded files remain in history and follow the Output Copy Folder
+setting; stopped results are not automatically imported or applied. The run's
+execution ID is retained when returned by Atlas. Tracking cannot currently be
+resumed from history. No verified server-cancellation endpoint was available for
+this implementation.
 
 **Use These Inputs** offers two explicit choices: original uploaded asset IDs,
 or the captured scene/file references resolved against their current contents.

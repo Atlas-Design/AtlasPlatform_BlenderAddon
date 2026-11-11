@@ -38,11 +38,14 @@ For the native adapters and the full inherited regression suite:
 Validated with Blender 4.0.2 and 5.1. Tests include scene dependency packaging,
 unsaved pixels, collection append, USDZ texture survival across reopening,
 skinned animation and motion, SVG curves, media timing/overlap and context reuse.
-The native suite contains **43 checks**, including **34 base regressions**;
+The native suite contains **49 checks**, including **40 base regressions**;
 the parser/transport suite contains **12**. Both Blender versions pass the native
 suite. Coverage includes per-workflow drafts, historical source reuse, run labels,
 persistent unreviewed results, explicit navigation and non-destructive image preview,
-as well as settings, storage safety and concurrent execution.
+as well as settings, storage safety and concurrent execution. Run-controls checks
+cover exact-run deletion, active-run guards, stopping during upload/submission/
+poll/download, interruptible polling waits, partial-file preservation, output
+copies, independent concurrent runs and completion races.
 
 For an actual native GUI smoke run with synthetic results (no Atlas calls):
 
@@ -56,6 +59,8 @@ and quits. On Blender 4.0, the harness temporarily draws the panel under Item
 because category selection is unavailable through RNA; production uses Atlas.
 Inspect the captures as well as the report. It does not install the
 release ZIP or replace the interactive acceptance cases in the testing guide.
+Pass `--dialog stop` or `--dialog delete` to capture the corresponding confirmation
+instead of the image popup; neither confirmation is accepted by the smoke script.
 
 `create_live_fixtures.py` generates small synthetic assets in a supplied directory
 when run in factory-startup background Blender. `live_api_smoke.py` is an opt-in

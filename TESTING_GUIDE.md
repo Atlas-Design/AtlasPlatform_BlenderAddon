@@ -1,6 +1,13 @@
 # Atlas Blender addon — release testing guide
 
-Updated 2026-09-30 for API types, native adapters, settings and the Run/Jobs experience.
+Updated 2026-10-01 for API types, native adapters, settings and the Run/Jobs experience.
+
+### Source verification — 2026-11-11
+
+- Parser/transport: 12 tests passed; Blender 5.1: all 49 native regressions passed.
+- `git diff --check` passed. Initial sandbox runs encountered temporary-directory permission errors; the same suites passed outside the sandbox.
+- Blender 4.0.2 was unavailable at the documented portable path and was not rerun. Earlier 4.0.2 results below remain historical evidence.
+- This verification covers the source being committed, not installed-ZIP, interactive UI, or live API release acceptance.
 
 ## 1. What is left
 
@@ -9,7 +16,7 @@ The five planned implementation phases are complete. This is **not yet a release
 | Area | Evidence already obtained | Remaining release work |
 | --- | --- | --- |
 | Parser and HTTP transport | 12 automated checks passed | Rerun against the final source revision after fixes. |
-| Blender behavior | 43 checks passed independently in Blender 4.0.2 and 5.1 | Interactive dialogs, file pickers, appearance, undo, realistic projects, and the installed ZIP. |
+| Blender behavior | 49 checks passed independently in Blender 4.0.2 and 5.1 | Interactive dialogs, file pickers, appearance, undo, realistic projects, and the installed ZIP. |
 | Live API | Three executions of the supplied dev workflow returned all 21 output parameters; one run reused returned UUIDs without uploading again | A run through the installed addon's UI; explicit optional/default cases; denied/missing asset cases. |
 | File formats | Live testing found and fixed missing upload MIME and incorrect download extensions | Inspect actual output content and native actions in the final candidate. |
 | Asset-object responses | Local fixtures cover objects with `fid`, URLs and metadata | Verify against a deployment or controlled test endpoint that actually returns this shape. The tested dev endpoint returned legacy UUID strings. |
@@ -17,8 +24,8 @@ The five planned implementation phases are complete. This is **not yet a release
 | Package and upgrade | Source layout registered in automated Blender tests | Build/install the exact ZIP; restart; disable/re-enable; upgrade with existing history and library. |
 | Delivery | Changes currently exist locally | Review fixes, choose/update release version, commit locally, build final ZIP and approve release. |
 
-The current suites contain **55 distinct automated checks**: 43 Blender checks
-(including 34 base regressions) and 12 parser/transport checks. The native suite
+The current suites contain **61 distinct automated checks**: 49 Blender checks
+(including 40 base regressions) and 12 parser/transport checks. The native suite
 passes on Blender 4.0.2 and 5.1. Running the base suite separately repeats its checks.
 Native GUI smoke captures also exercise Run, Jobs, job detail and the image popup
 using synthetic local results. This is source-level evidence; installation, realistic
@@ -124,7 +131,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Blender 5.1 tests failed' }
 git diff --check
 ```
 
-Expected: 12 parser/transport tests and 43 Blender tests in each version, all `OK`, with successful exit codes. Some negative tests deliberately produce error-level Blender reports. Judge the test result and exit code rather than failing a log simply because it contains the word `Error`.
+Expected: 12 parser/transport tests and 49 Blender tests in each version, all `OK`, with successful exit codes. Some negative tests deliberately produce error-level Blender reports. Judge the test result and exit code rather than failing a log simply because it contains the word `Error`.
 
 These tests use isolated temporary files and simulated transport. They do not install the release ZIP or verify an interactive popup. The explicit live script in section 17 makes real API calls.
 
@@ -378,7 +385,7 @@ Opening a complete scene and appending a collection are different actions. Neith
 | CON-03 | Let one run fail while the other completes. | Failure cleanup does not delete successful/active files belonging to the other run. |
 | CON-04 | Clear/unload the selected workflow while a run finishes. | Job-owned output definitions still allow correct durable history. |
 | CON-05 | Close/reopen Blender while a controlled test run is active. | No project corruption. Record unfinished-job behavior; automatic remote cancellation, recovery or resumed polling is not implemented as a promised feature. |
-| CON-06 | Exercise local operator cancellation through the automated cancellation test or an available developer test harness. | Files needed by the worker remain until it finishes; do not claim the remote execution was cancelled. There is no assumed dedicated Cancel button in this guide. |
+| CON-06 | Exercise local operator cancellation through the automated cancellation test or an available developer test harness. | Files needed by the worker remain until it finishes; do not claim the remote execution was cancelled. Use Stop Tracking for the user-facing action; it does not promise server cancellation. |
 | PREF-01 | Auto-import meshes off/on, using a scalar mesh and a mesh array. | Scalar behavior follows the preference; arrays still need explicit per-item/batch import. |
 | PREF-02 | Auto-apply images off/on with an active object, then no active object. | Scalar preference works when applicable; no crash or unintended bulk application. |
 | PREF-03 | Change request timeout and polling interval for a controlled slow endpoint. | Settings affect request timing as documented; no unbounded wait when a finite timeout should apply. |
@@ -473,6 +480,24 @@ captures cover parts of these cases; they do not replace the installed-candidate
 | UX-13 | Collapse/expand Atlas and reorder it alongside another native panel where available. | Standard Blender header and background, without a transparent headerless panel. |
 | UX-14 | Use as Input / Use All as Input from an output. | Returns to Run with compatible IDs assigned/appended in order. Different API origins are rejected. |
 | UX-15 | Load a changed workflow definition after editing its draft. | Compatible fields restore; new or changed-type fields retain the new definition's defaults. |
+
+## 17a.1. Run feedback and individual controls
+
+The 2026-10-01 source pass includes 49 native regressions on each Blender version,
+12 parser/transport checks and native screenshots. The following remain candidate
+installation acceptance cases, including real network timing and dialog cancellation.
+
+| ID | Steps | Expected |
+| --- | --- | --- |
+| CTRL-01 | Run a workflow, remain in Run and start a second run. | Persistent confirmation beside Run identifies the latest run and shows its phase, elapsed time and View Job. Both runs remain tracked independently. |
+| CTRL-02 | Select a failed or completed run in Jobs, click Delete Run, then cancel the dialog. Repeat and confirm. | Cancelling preserves everything. Confirmation deletes only that run and its local files; siblings, current draft, remote assets and Output Copy Folder files remain. |
+| CTRL-03 | Select an active run, including one stopping an in-flight request. | Stop Tracking is available while active; Delete Run is unavailable until local work finishes. A repeated stop request does not affect other runs. |
+| CTRL-04 | Stop while uploading, submitting, waiting between polls and receiving a status response. | Current request may finish. No later requests start once the worker observes the stop. A submission already in flight may still start remotely. Dialog and saved status do not claim remote cancellation. |
+| CTRL-05 | Stop during the first download of a multi-output run. | Completed download is retained in history and copied if configured; remaining files are not fetched. No stopped result is automatically imported/applied. |
+| CTRL-06 | Stop one of two active runs while editing a different workflow. | Other run continues; draft and view do not change. Stopped record retains submitted IDs and execution ID when available. |
+| CTRL-07 | Allow completion while a Stop Tracking dialog is open, then confirm it. | Completed result wins if worker was already done; success is not replaced with a stopped status. |
+| CTRL-08 | Stop with a deliberately stalled local test endpoint; repeat with a finite timeout and No Limit. | Stopping remains visible until request returns or times out. No Limit can wait indefinitely. UI remains responsive and does not advertise remote cancellation. |
+| CTRL-09 | Filter Tracking stopped, restart, inspect the run, then delete it. | Distinct status/message persists; saved partial outputs remain accessible; reviewed marker and deletion work normally. Automatic resume is not offered. |
 
 ## 17b. Settings audit
 

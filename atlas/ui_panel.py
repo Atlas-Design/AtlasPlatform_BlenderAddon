@@ -50,6 +50,36 @@ def draw_collapsible_box(layout, state, prop_name: str, label: str, icon: str):
     return box, expanded
 
 
+def draw_run_actions(layout, state, job):
+    """Actions bind to a stable run ID, regardless of list order and filters."""
+    running = next((r for r in state.running_jobs if r.job_id == job.job_id), None)
+    if running:
+        row = layout.row()
+        row.enabled = not running.stop_requested
+        row.operator('atlas.stop_tracking', text='Stopping…' if running.stop_requested else 'Stop Tracking',
+                     icon='PAUSE').job_id = job.job_id
+    elif job.status in (2, 3, 4, 5):
+        layout.operator('atlas.delete_job', text='Delete Run', icon='TRASH').job_id = job.job_id
+
+
+def draw_start_feedback(layout, state):
+    job = next((j for j in state.job_history if j.job_id == state.last_started_job_id), None)
+    if not job:
+        return
+    running = next((r for r in state.running_jobs if r.job_id == job.job_id), None)
+    box = layout.box()
+    title = box.row()
+    title.scale_y = 1.3
+    title.label(text=f'Run #{job.run_number} started' if running else f'Run #{job.run_number}: {job.get_status_name()}',
+                icon='TIME' if running else job.get_status_icon())
+    box.label(text=job.workflow_name)
+    if running:
+        for line in textwrap.wrap(running.status, 34):
+            box.label(text=line)
+        box.label(text=f'Elapsed: {running.elapsed_time}')
+    box.operator('atlas.select_job', text='View Job' if running else 'View Results', icon='FORWARD').job_id = job.job_id
+
+
 # -------------------------------------------------------------------
 # --- Base Panel Class ---
 # -------------------------------------------------------------------
@@ -105,7 +135,7 @@ class ATLAS_PT_MainControlPanel(ATLAS_PT_BasePanel):
         if not state.history_loaded and not JobsView._auto_load_scheduled:
             JobsView._auto_load_scheduled = True
             bpy.app.timers.register(JobsView._deferred_load_history, first_interval=0.1)
-        unread = [job for job in state.job_history if not job.reviewed and job.status in (2, 3, 4)]
+        unread = [job for job in state.job_history if not job.reviewed and job.status in (2, 3, 4, 5)]
         row = layout.row(align=True)
         row.label(text=f'{len(state.running_jobs)} running', icon='TIME')
         if unread:
@@ -197,6 +227,7 @@ class WorkflowForm:
 
         # --- RUN BUTTON ---
         layout.separator()
+        draw_start_feedback(layout, state)
         run_text = f"Run {state.active_name}" if state.active_name else "Run Workflow"
         layout.operator("atlas.run_workflow", text=run_text, icon='PLAY')
 
@@ -231,7 +262,7 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
                             if job.job_id == item.job_id), None)
             if running:
                 row.label(text=running.elapsed_time)
-            if not item.reviewed and item.status in (2, 3, 4):
+            if not item.reviewed and item.status in (2, 3, 4, 5):
                 row.label(text='', icon='REC')
             
             op = row.operator("atlas.select_job", text="", icon='FORWARD')
@@ -252,7 +283,7 @@ class ATLAS_UL_JobHistoryList(bpy.types.UIList):
         
         # Apply status filter
         if state.filter_status != 'ALL':
-            status_map = {'COMPLETED': 2, 'FAILED': 3, 'RUNNING': 1}
+            status_map = {'COMPLETED': 2, 'FAILED': 3, 'RUNNING': 1, 'STOPPED': 5}
             target_status = status_map.get(state.filter_status, -1)
             for i, item in enumerate(items):
                 if item.status != target_status:
@@ -337,6 +368,7 @@ class JobsView:
             layout.label(text=f'{selected.created_at_display} · {selected.result_summary}')
             layout.operator('atlas.select_job', text='View Results' if selected.status in (2, 3) else 'View Job',
                             icon='FORWARD').job_id = selected.job_id
+            draw_run_actions(layout, state, selected)
         
         # Just refresh button at bottom
         layout.operator("atlas.refresh_job_history", text="", icon='FILE_REFRESH')
@@ -373,6 +405,9 @@ class JobsView:
         elif selected_job.status == 0:
             header_row.label(text="", icon='PAUSE')
             status_text = "Queued"
+        elif selected_job.status in (4, 5):
+            header_row.label(text="", icon='PAUSE')
+            status_text = selected_job.get_status_name()
         else:
             header_row.label(text="", icon='TIME')
             status_text = "Running"
@@ -393,6 +428,13 @@ class JobsView:
         header_col.label(text=timestamp)
         header_col.label(text=status_text)
         header_col.label(text=job_manager.result_summary(full_job))
+        draw_run_actions(layout, state, selected_job)
+        if running_job and running_job.stop_requested:
+            for line in textwrap.wrap('Waiting for the current request to return. Remote execution may continue.', 34):
+                layout.label(text=line)
+        if full_job.StopMessage:
+            for line in textwrap.wrap(full_job.StopMessage, 34):
+                layout.label(text=line)
         row = layout.row(align=True)
         row.operator('atlas.rename_job', text='', icon='GREASEPENCIL').job_folder_path = full_job.JobFolderPath
         restore_row = row.row(align=True)

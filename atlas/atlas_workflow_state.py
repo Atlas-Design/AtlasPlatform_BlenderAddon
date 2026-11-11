@@ -87,7 +87,7 @@ class AtlasJobHistoryItem(PropertyGroup):
     
     def get_status_name(self) -> str:
         """Return status as string."""
-        names = {0: "Pending", 1: "Running", 2: "Completed", 3: "Failed", 4: "Cancelled"}
+        names = {0: "Pending", 1: "Running", 2: "Completed", 3: "Failed", 4: "Cancelled", 5: "Tracking stopped"}
         return names.get(self.status, "Unknown")
 
 
@@ -104,6 +104,8 @@ class AtlasRunningJobItem(PropertyGroup):
         name="Workflow Name",
         description="Name of the workflow being executed"
     )
+    run_number: IntProperty()
+    stop_requested: BoolProperty(default=False)
     status: StringProperty(
         name="Status",
         description="Current status message",
@@ -233,6 +235,7 @@ class AtlasWorkflowState(PropertyGroup):
     workflow_drafts_json: StringProperty(default='{}', options={'HIDDEN', 'SKIP_SAVE'})
     active_definition_json: StringProperty(default='', options={'HIDDEN'})
     draft_notice: StringProperty(default='')
+    last_started_job_id: StringProperty(default='', options={'SKIP_SAVE'})
     history_loaded: BoolProperty(default=False, options={'SKIP_SAVE'})
 
     # --- Parameter Collections ---
@@ -278,6 +281,7 @@ class AtlasWorkflowState(PropertyGroup):
             ('COMPLETED', "Success", "Show only completed jobs"),
             ('FAILED', "Failed", "Show only failed jobs"),
             ('RUNNING', "Running", "Show only running jobs"),
+            ('STOPPED', "Tracking stopped", "Show locally stopped runs; remote status is unknown"),
         ],
         default='ALL',
         update=_on_filter_changed

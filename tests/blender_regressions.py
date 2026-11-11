@@ -607,6 +607,211 @@ class BlenderRegressions(unittest.TestCase):
         self.assertIsNone(runner._error)
         self.assertFalse(Path(runner._temp_dir).exists())
 
+    def test_delete_run_targets_exact_finished_job_and_preserves_copies(self):
+        self.workflow('delete-draft')
+        draft = state_module.capture_input_values(self.state)
+        victim = jobs.create_job('same', 'Same name', '0.2', [], output_copy_root=str(self.root / 'copies'))
+        survivor = jobs.create_job('same', 'Same name', '0.2', [])
+        jobs.fail_job(victim, 'test failure')
+        copies = Path(victim.OutputCopyFolder)
+        copies.mkdir(parents=True, exist_ok=True)
+        marker = copies / 'keep.txt'
+        marker.write_text('external copy')
+        bpy.ops.atlas.refresh_job_history()
+        bpy.ops.atlas.select_job(job_id=victim.JobId)
+        active = self.state.running_jobs.add()
+        active.job_id = victim.JobId  # Even inconsistent persisted state must not delete a live run.
+        self.assertEqual(bpy.ops.atlas.delete_job(job_id=victim.JobId), {'CANCELLED'})
+        self.state.running_jobs.remove(len(self.state.running_jobs) - 1)
+        self.assertEqual(bpy.ops.atlas.delete_job(job_id=survivor.JobId), {'CANCELLED'})
+        self.assertEqual(bpy.ops.atlas.delete_job(job_id=victim.JobId), {'FINISHED'})
+        self.assertFalse(Path(victim.JobFolderPath).exists())
+        self.assertTrue(Path(survivor.JobFolderPath).exists())
+        self.assertTrue(marker.exists())
+        self.assertFalse(self.state.job_history_detail_mode)
+        self.assertEqual(state_module.capture_input_values(self.state), draft)
+        self.assertEqual(bpy.ops.atlas.delete_job(job_id=victim.JobId), {'CANCELLED'})
+
+    def test_stop_during_upload_preserves_other_run_and_prevents_submission(self):
+        clients = [FakeClient('unused', b'fixture'), FakeClient('other', b'fixture')]
+        clients[0].execute_async = Mock(return_value='must-not-submit')
+        runners = [Runner(), Runner()]
+        context = self.context()
+        try:
+            for runner, client, name in zip(runners, clients, ('stop-upload', 'keep-running')):
+                self.workflow(name)
+                with patch.object(ops, 'AtlasAPIClient', return_value=client):
+                    self.assertEqual(runner.execute(context), {'RUNNING_MODAL'})
+                self.assertTrue(client.upload_started.wait(5))
+                self.assertEqual(self.state.last_started_job_id, runner._job.JobId)
+            target = runners[0]
+            selected_draft = state_module.capture_input_values(self.state)
+            self.assertEqual(bpy.ops.atlas.stop_tracking(job_id=target._job.JobId), {'FINISHED'})
+            self.assertFalse(runners[1]._stop_event.is_set())
+            self.assertEqual(target.modal(context, SimpleNamespace(type='TIMER')), {'RUNNING_MODAL'})
+            running = next(r for r in self.state.running_jobs if r.job_id == target._job.JobId)
+            self.assertTrue(running.stop_requested)
+            self.assertEqual(running.current_phase, 'stopping')
+            self.assertTrue(Path(clients[0].upload_path).exists())
+            self.assertEqual(bpy.ops.atlas.delete_job(job_id=target._job.JobId), {'CANCELLED'})
+            clients[0].allow_upload.set()
+            target._thread.join(5)
+            clients[0].execute_async.assert_not_called()
+            self.assertEqual(target.modal(context, SimpleNamespace(type='TIMER')), {'FINISHED'})
+            saved = jobs.get_job(target._job.JobFolderPath)
+            self.assertEqual(saved.Status, jobs.JobStatus.TRACKING_STOPPED)
+            self.assertIsNone(saved.ExecutionId)
+            self.assertEqual(saved.SubmittedInputs['input'], 'input-file')
+            self.assertEqual(saved.OutputsSnapshot, [])
+            self.assertFalse(Path(target._temp_dir).exists())
+            self.assertEqual(state_module.capture_input_values(self.state), selected_draft)
+            self.assertEqual(self.state.view_mode, 'RUN')
+            bpy.ops.atlas.select_job(job_id=saved.JobId)
+            self.assertTrue(jobs.get_job(saved.JobFolderPath).Reviewed)
+            self.assertEqual(bpy.ops.atlas.delete_job(job_id=saved.JobId), {'FINISHED'})
+        finally:
+            for runner, client in zip(runners, clients):
+                if runner._thread and runner._thread.is_alive():
+                    runner.cancel(context)
+                client.allow_upload.set()
+                if runner._thread:
+                    runner._thread.join(5)
+
+    def test_stop_wakes_poll_wait_and_does_not_download_or_claim_remote_cancel(self):
+        self.workflow('stop-poll')
+        self.state.inputs[0].source_type = 'ASSET'
+        self.state.inputs[0].asset_id = 'existing'
+        submitted = threading.Event()
+        client = Mock()
+        def submit(*args):
+            submitted.set()
+            return 'remote-execution'
+        client.execute_async.side_effect = submit
+        context = self.context()
+        runner = Runner()
+        try:
+            with patch.object(ops, 'AtlasAPIClient', return_value=client), \
+                 patch.object(ops.preferences, 'get_poll_interval', return_value=60):
+                runner.execute(context)
+            self.assertTrue(submitted.wait(5))
+            self.assertEqual(bpy.ops.atlas.stop_tracking(job_id=runner._job.JobId), {'FINISHED'})
+            runner._thread.join(5)
+            self.assertFalse(runner._thread.is_alive())
+            runner.modal(context, SimpleNamespace(type='TIMER'))
+            saved = jobs.get_job(runner._job.JobFolderPath)
+            self.assertEqual(saved.ExecutionId, 'remote-execution')
+            self.assertEqual(saved.Status, jobs.JobStatus.TRACKING_STOPPED)
+            self.assertIn('Remote execution may continue', saved.StopMessage)
+            self.assertNotEqual(saved.ExecutionStatus, jobs.ExecutionStatus.COMPLETED)
+            client.poll_status.assert_not_called()
+            client.download_file.assert_not_called()
+        finally:
+            if runner._thread and runner._thread.is_alive():
+                runner.cancel(context)
+                runner._thread.join(5)
+
+    def test_stop_download_retains_partial_file_without_scene_changes(self):
+        definition = ops.WorkflowDefinition.from_dict(dict(version='0.2', api_id='stop-download',
+            base_url='https://example.invalid', name='Download', inputs=[],
+            outputs=[dict(id='images', type='image', isArray=True)]))
+        state_module.populate_state_from_definition(bpy.context, self.state, definition)
+        started, release = threading.Event(), threading.Event()
+        client = Mock()
+        client.execute_async.return_value = 'download-execution'
+        client.poll_status.return_value = ops.api_client.StatusResult(
+            ops.ExecutionStatus.COMPLETED, outputs={'images': ['one', 'two']})
+        def download(api, value, path):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError('Download test timed out')
+            Path(path).write_bytes(b'downloaded bytes')
+            return path
+        client.download_file.side_effect = download
+        context, runner = self.context(), Runner()
+        counts = (len(bpy.data.objects), len(bpy.data.images), len(bpy.data.materials))
+        try:
+            with patch.object(ops, 'AtlasAPIClient', return_value=client), \
+                 patch.object(ops.preferences, 'prepare_output_copy_root', return_value=str(self.root / 'stopped-copies')):
+                runner.execute(context)
+            self.assertTrue(started.wait(5))
+            bpy.ops.atlas.stop_tracking(job_id=runner._job.JobId)
+            release.set()
+            runner._thread.join(5)
+            runner.modal(context, SimpleNamespace(type='TIMER'))
+            client.download_file.assert_called_once()
+            saved = jobs.get_job(runner._job.JobFolderPath)
+            self.assertEqual(saved.Status, jobs.JobStatus.TRACKING_STOPPED)
+            path = Path(saved.OutputsSnapshot[0]['Items'][0]['FilePath'])
+            self.assertEqual(path.read_bytes(), b'downloaded bytes')
+            self.assertTrue(path.is_relative_to(Path(saved.JobFolderPath)))
+            self.assertEqual((Path(saved.OutputCopyFolder) / path.name).read_bytes(), b'downloaded bytes')
+            self.assertEqual((len(bpy.data.objects), len(bpy.data.images), len(bpy.data.materials)), counts)
+            self.assertFalse(Path(runner._temp_dir).exists())
+        finally:
+            release.set()
+            if runner._thread and runner._thread.is_alive():
+                runner.cancel(context)
+                runner._thread.join(5)
+
+    def test_stop_waits_for_inflight_submit_or_poll_then_makes_no_more_requests(self):
+        for stage in ('submit', 'poll'):
+            with self.subTest(stage=stage):
+                self.workflow('stop-inflight-' + stage)
+                self.state.inputs[0].source_type = 'ASSET'
+                self.state.inputs[0].asset_id = 'existing'
+                started, release = threading.Event(), threading.Event()
+                client = Mock()
+                completed = ops.api_client.StatusResult(ops.ExecutionStatus.COMPLETED,
+                                                       outputs={'image': 'must-not-download'})
+                def blocked(*args):
+                    started.set()
+                    if not release.wait(5):
+                        raise RuntimeError('In-flight test timed out')
+                    return 'inflight-execution' if stage == 'submit' else completed
+                client.execute_async.return_value = 'inflight-execution'
+                client.poll_status.return_value = completed
+                getattr(client, 'execute_async' if stage == 'submit' else 'poll_status').side_effect = blocked
+                runner, context = Runner(), self.context()
+                try:
+                    with patch.object(ops, 'AtlasAPIClient', return_value=client):
+                        runner.execute(context)
+                    self.assertTrue(started.wait(5))
+                    bpy.ops.atlas.stop_tracking(job_id=runner._job.JobId)
+                    self.assertFalse(runner._done)
+                    self.assertFalse(jobs.can_delete_job(jobs.get_job(runner._job.JobFolderPath)))
+                    release.set()
+                    runner._thread.join(5)
+                    runner.modal(context, SimpleNamespace(type='TIMER'))
+                    client.download_file.assert_not_called()
+                    self.assertEqual(client.poll_status.call_count, int(stage == 'poll'))
+                    saved = jobs.get_job(runner._job.JobFolderPath)
+                    self.assertEqual(saved.Status, jobs.JobStatus.TRACKING_STOPPED)
+                    self.assertEqual(saved.ExecutionId, 'inflight-execution')
+                finally:
+                    release.set()
+                    if runner._thread and runner._thread.is_alive():
+                        runner.cancel(context)
+                        runner._thread.join(5)
+
+    def test_stop_after_worker_completed_keeps_successful_result(self):
+        self.workflow('stop-race')
+        self.state.inputs[0].source_type = 'ASSET'
+        self.state.inputs[0].asset_id = 'existing'
+        client = Mock()
+        client.execute_async.return_value = 'already-completed'
+        client.poll_status.return_value = ops.api_client.StatusResult(ops.ExecutionStatus.COMPLETED,
+                                                                      outputs={'text': 'done'})
+        runner, context = Runner(), self.context()
+        with patch.object(ops, 'AtlasAPIClient', return_value=client):
+            runner.execute(context)
+        runner._thread.join(5)
+        self.assertEqual(bpy.ops.atlas.stop_tracking(job_id=runner._job.JobId), {'CANCELLED'})
+        runner.modal(context, SimpleNamespace(type='TIMER'))
+        saved = jobs.get_job(runner._job.JobFolderPath)
+        self.assertEqual(saved.Status, jobs.JobStatus.COMPLETED)
+        self.assertEqual(saved.OutputsSnapshot[0]['StringValue'], 'done')
+        self.assertNotIn(saved.JobId, ops._active_runs)
+
     def test_failed_job_releases_only_its_own_files(self):
         self.workflow('failed')
         runner = Runner()

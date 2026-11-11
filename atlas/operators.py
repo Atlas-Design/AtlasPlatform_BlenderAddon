@@ -24,6 +24,11 @@ from types import SimpleNamespace
 from array import array
 from dataclasses import dataclass, field
 log = logging.getLogger("atlas_workflow")
+_active_runs = {}  # Main-thread registry; worker threads only inspect their Event.
+
+
+class _TrackingStopped(Exception):
+    pass
 
 # --- Blender and Addon-Specific Imports ---
 import bpy
@@ -697,7 +702,7 @@ class ATLAS_OT_SelectJob(Operator):
             state.job_detail_inputs_expanded = False
             state.view_mode = 'JOBS'
             item = state.job_history[index]
-            if item.status in (2, 3, 4):
+            if item.status in (2, 3, 4, 5):
                 job = job_manager.get_job(item.job_folder_path)
                 if job:
                     job.Reviewed = True
@@ -719,6 +724,73 @@ class ATLAS_OT_BackToJobList(Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         state = context.window_manager.atlas_workflow_state
         state.job_history_detail_mode = False
+        return {'FINISHED'}
+
+
+class ATLAS_OT_DeleteJob(Operator):
+    """Delete this finished run and its local files; keep output copies and remote assets"""
+    bl_idname = 'atlas.delete_job'
+    bl_label = 'Delete Run'
+    job_id: StringProperty(options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        self.layout.label(text='Delete this run and its downloaded files?', icon='TRASH')
+        job = next((j for j in job_manager.get_all_jobs() if j.JobId == self.job_id), None)
+        if job:
+            self.layout.label(text=f'Run {job.RunNumber or job.JobId[:8]}: {job.UserLabel or job.WorkflowName}')
+        self.layout.label(text='This cannot be undone. Output copies and remote assets stay.')
+
+    def execute(self, context):
+        state = context.window_manager.atlas_workflow_state
+        if self.job_id in _active_runs or any(j.job_id == self.job_id for j in state.running_jobs):
+            self.report({'WARNING'}, 'This run is still active. Wait until local tracking has stopped.')
+            return {'CANCELLED'}
+        job = next((j for j in job_manager.get_all_jobs() if j.JobId == self.job_id), None)
+        if not job or not job_manager.delete_job(job):
+            self.report({'WARNING'}, 'Run unavailable, still unfinished, or its files could not be deleted.')
+            return {'CANCELLED'}
+        bpy.ops.atlas.refresh_job_history()
+        redraw_view3d_ui()
+        self.report({'INFO'}, 'Run and local files deleted.')
+        return {'FINISHED'}
+
+
+class ATLAS_OT_StopTracking(Operator):
+    """Stop local requests for this run; Atlas may continue processing and charging remotely"""
+    bl_idname = 'atlas.stop_tracking'
+    bl_label = 'Stop Tracking'
+    job_id: StringProperty(options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        self.layout.label(text='Stop following this run in Blender?', icon='PAUSE')
+        job = next((j for j in context.window_manager.atlas_workflow_state.job_history
+                    if j.job_id == self.job_id), None)
+        if job:
+            self.layout.label(text=f'Run {job.run_number or job.job_id[:8]}: {job.user_label or job.workflow_name}')
+        self.layout.label(text='This does not cancel execution on Atlas.')
+        self.layout.label(text='Remote processing and charges may continue.')
+        self.layout.label(text='An in-flight request must return before tracking stops.')
+        self.layout.label(text='Downloaded results stay in history; no further results are fetched.')
+
+    def execute(self, context):
+        runner = _active_runs.get(self.job_id)
+        if not runner or runner._done:
+            self.report({'INFO'}, 'This run has already finished or is not tracked in this session.')
+            return {'CANCELLED'}
+        runner._stop_event.set()
+        state = context.window_manager.atlas_workflow_state
+        for job in state.running_jobs:
+            if job.job_id == self.job_id:
+                job.stop_requested = True
+        runner._update_running_job(state, 'Stopping tracking; waiting for current request',
+                                   '', 'stopping')
+        redraw_view3d_ui()
         return {'FINISHED'}
 
 
@@ -1198,6 +1270,12 @@ class ATLAS_OT_RunWorkflow(Operator):
     _output_params: list | None = None
     _workflow_key: tuple | None = None
     _cancelled: bool = False
+    _stop_event = None
+    _execution_id: str = ''
+
+    def _check_tracking(self):
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise _TrackingStopped()
     
     # --- Job Persistence ---
     _job: JobRecord | None = None
@@ -1223,11 +1301,13 @@ class ATLAS_OT_RunWorkflow(Operator):
         4. Download output files
         """
         try:
+            self._check_tracking()
             self._submitted_inputs = json.loads(json.dumps(payload))
             # STAGE 1: UPLOAD FILES
             if upload_plan:
                 self._current_status = "uploading"
                 for i, item in enumerate(upload_plan):
+                    self._check_tracking()
                     self._status_message = f"Uploading {os.path.basename(item['path'])} ({i + 1}/{len(upload_plan)})..."
                     file_id = client.upload_file(api_id, item['path'])
                     if item.get('index') is None:
@@ -1238,18 +1318,25 @@ class ATLAS_OT_RunWorkflow(Operator):
                     log.info(f"[Atlas] Uploaded {item['param_id']}: {file_id}")
 
             # STAGE 2: EXECUTE WORKFLOW (ASYNC)
+            self._check_tracking()
             self._status_message = "Submitting workflow..."
             self._current_status = "submitting"
             execution_id = client.execute_async(api_id, payload)
+            self._execution_id = execution_id
             log.info(f"[Atlas] Execution started: {execution_id}")
 
             # STAGE 3: POLL FOR COMPLETION
             self._status_message = "Waiting for execution..."
             self._current_status = "pending"
             while True:
-                time.sleep(self._poll_interval)
+                if self._stop_event is not None:
+                    self._stop_event.wait(self._poll_interval)
+                else:
+                    time.sleep(self._poll_interval)
+                self._check_tracking()
                 
                 result = client.poll_status(execution_id)
+                self._check_tracking()
                 self._current_status = result.status.value
                 
                 # Update status message based on state
@@ -1280,6 +1367,7 @@ class ATLAS_OT_RunWorkflow(Operator):
             self._import_plan = []
             errors = []
             for param_index, param in enumerate(self._output_params):
+                self._check_tracking()
                 param.raw_value = self._outputs_result.get(param.param_id)
                 if param.param_type not in FILE_FORMATS or param.raw_value is None:
                     continue
@@ -1288,6 +1376,7 @@ class ATLAS_OT_RunWorkflow(Operator):
                     errors.append(f'{param.label}: expected an array of assets')
                     continue
                 for index, value in enumerate(values):
+                    self._check_tracking()
                     record = {'Index': index, 'AssetId': '', 'FilePath': '', 'Error': '',
                               'ApiOrigin': self._api_origin, 'Format': param.file_format}
                     param.items.append(record)
@@ -1308,12 +1397,17 @@ class ATLAS_OT_RunWorkflow(Operator):
                         record['Error'] = str(exc)
                         errors.append(f'{param.label}[{index}]: {exc}')
 
+            self._check_tracking()
+
             if errors:
                 self._error = '; '.join(errors)
 
             self._status_message = self._error or "Workflow finished successfully."
             self._current_status = "failed" if self._error else "completed"
 
+        except _TrackingStopped:
+            self._status_message = 'Tracking stopped locally; remote execution may continue.'
+            self._current_status = 'stopped'
         except Exception as e:
             # If anything goes wrong, record the error for the main thread.
             self._error = str(e)
@@ -1416,6 +1510,8 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._import_plan = []
         self._outputs_result = None
         self._submitted_inputs = None
+        self._stop_event = threading.Event()
+        self._execution_id = ''
         self._status_message = "Initializing..."
         self._current_status = "initializing"
         self._start_time = time.time()
@@ -1437,6 +1533,9 @@ class ATLAS_OT_RunWorkflow(Operator):
         running_job.started_at = started_at
         running_job.elapsed_time = "0.0s"
         running_job.current_phase = "initializing"
+        running_job.run_number = self._job.RunNumber
+        state.last_started_job_id = self._running_job_id
+        _active_runs[self._running_job_id] = self
         
         # Legacy single-job state (for backwards compatibility)
         state.job_running = True
@@ -1471,6 +1570,7 @@ class ATLAS_OT_RunWorkflow(Operator):
         if self._done:
             if self._job:
                 self._job.SubmittedInputs = self._submitted_inputs or {}
+                self._job.ExecutionId = self._execution_id or None
                 # Preserve labels changed while the worker was running.
                 stored = job_manager.get_job(self._job.JobFolderPath)
                 if stored:
@@ -1484,6 +1584,32 @@ class ATLAS_OT_RunWorkflow(Operator):
             
             # Update legacy state
             state.job_running = len(state.running_jobs) > 0
+
+            if self._stop_event is not None and self._stop_event.is_set():
+                try:
+                    # Persist partial downloads without scene imports or workflow publication.
+                    self._update_primitive_outputs()
+                    snapshots = self._create_outputs_snapshot() if self._outputs_result is not None else []
+                    self._job.OutputsSnapshot = [vars(snapshot) for snapshot in snapshots]
+                    self._job.Status = JobStatus.TRACKING_STOPPED
+                    from datetime import datetime, timezone
+                    self._job.CompletedAtUtc = datetime.now(timezone.utc).isoformat()
+                    self._job.StopMessage = 'Tracking stopped locally. Remote execution may continue; no further results will be fetched.'
+                    self._job.save()
+                    try:
+                        job_manager.export_output_copies(self._job)
+                    except OSError as exc:
+                        self._job.StopMessage += f' Output copy failed: {exc}'
+                        self._job.save()
+                except Exception as exc:
+                    job_manager.fail_job(self._job, f'Could not save stopped-run results: {exc}')
+                finally:
+                    release_job_temp_dir(self._temp_dir)
+                bpy.ops.atlas.refresh_job_history()
+                redraw_view3d_ui()
+                state.job_status = 'Tracking stopped locally'
+                self.report({'INFO'}, 'Tracking stopped in Blender. Atlas may still be processing.')
+                return {'FINISHED'}
 
             if self._error and self._outputs_result is None:
                 # Handle errors from the background thread
@@ -1555,7 +1681,10 @@ class ATLAS_OT_RunWorkflow(Operator):
             elapsed_str = f"{elapsed:.1f}s"
             
             # Update running_job entry in collection
-            self._update_running_job(state, self._status_message, elapsed_str, self._current_status)
+            stopping = self._stop_event is not None and self._stop_event.is_set()
+            self._update_running_job(state,
+                                     'Stopping tracking; waiting for current request' if stopping else self._status_message,
+                                     elapsed_str, 'stopping' if stopping else self._current_status)
             
             # Legacy state update
             state.job_elapsed_time = elapsed_str
@@ -1575,6 +1704,8 @@ class ATLAS_OT_RunWorkflow(Operator):
         self._remove_running_job(state)
         state.job_running = len(state.running_jobs) > 0
         self._cancelled = True
+        if self._stop_event is not None:
+            self._stop_event.set()
         if self._done:
             release_job_temp_dir(self._temp_dir)
         
@@ -1594,6 +1725,7 @@ class ATLAS_OT_RunWorkflow(Operator):
 
     def _remove_running_job(self, state):
         """Remove this job from the running_jobs collection."""
+        _active_runs.pop(self._running_job_id, None)
         for i, job in enumerate(state.running_jobs):
             if job.job_id == self._running_job_id:
                 state.running_jobs.remove(i)
@@ -1899,6 +2031,8 @@ classes = (
     ATLAS_OT_ViewJobOutputImage,
     ATLAS_OT_AddImagePlane,
     ATLAS_OT_RenameJob,
+    ATLAS_OT_DeleteJob,
+    ATLAS_OT_StopTracking,
     ATLAS_OT_UseJobInputs,
     ATLAS_OT_ApplyJobOutputImage,
     ATLAS_OT_ImportJobOutputMesh,

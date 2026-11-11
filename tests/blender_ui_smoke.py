@@ -18,6 +18,7 @@ root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root.parent))
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', required=True)
+parser.add_argument('--dialog', choices=('preview', 'stop', 'delete'), default='preview')
 args = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
 output = Path(args.output).resolve()
 output.mkdir(parents=True, exist_ok=True)
@@ -71,10 +72,12 @@ pending = jobs.create_job('other', 'Mesh Generator', '0.2', [])
 running = state.running_jobs.add()
 running.job_id, running.workflow_name = pending.JobId, pending.WorkflowName
 running.current_phase, running.status, running.elapsed_time = 'running', 'Workflow running', '18.2s'
+running.run_number = pending.RunNumber
+state.last_started_job_id = pending.JobId
 bpy.ops.atlas.refresh_job_history()
 view = next(area for area in bpy.context.screen.areas if area.type == 'VIEW_3D')
 view.spaces.active.show_region_ui = True
-stages = iter(('run', 'jobs', 'detail', 'preview', 'done'))
+stages = iter(('run', 'jobs', 'running_detail', 'detail', args.dialog, 'done'))
 stage = None
 def tick():
     global stage
@@ -90,11 +93,20 @@ def tick():
         elif stage == 'jobs':
             state.view_mode = 'JOBS'
             state.job_history_detail_mode = False
+            state.job_history_index = next(i for i, j in enumerate(state.job_history) if j.job_id == job.JobId)
+        elif stage == 'running_detail':
+            bpy.ops.atlas.select_job(job_id=pending.JobId)
         elif stage == 'detail':
             bpy.ops.atlas.select_job(job_id=job.JobId)
         elif stage == 'preview':
             with bpy.context.temp_override(area=view, region=region):
                 bpy.ops.atlas.view_job_output_image('INVOKE_DEFAULT', file_path=image_path)
+        elif stage == 'stop':
+            with bpy.context.temp_override(area=view, region=region):
+                bpy.ops.atlas.stop_tracking('INVOKE_DEFAULT', job_id=pending.JobId)
+        elif stage == 'delete':
+            with bpy.context.temp_override(area=view, region=region):
+                bpy.ops.atlas.delete_job('INVOKE_DEFAULT', job_id=job.JobId)
         else:
             (output / 'report.json').write_text(json.dumps(dict(draw_errors=errors,
                 category_override=category_override)), encoding='utf-8')

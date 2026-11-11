@@ -55,6 +55,7 @@ class JobStatus(IntEnum):
     COMPLETED = 2
     FAILED = 3
     CANCELLED = 4
+    TRACKING_STOPPED = 5  # Local only; does not assert a remote cancellation.
 
 
 class ExecutionStatus(IntEnum):
@@ -138,6 +139,7 @@ class JobRecord:
     WorkflowSnapshot: Dict[str, Any] = field(default_factory=dict)
     InputDraft: List[Dict[str, Any]] = field(default_factory=list)
     SubmittedInputs: Dict[str, Any] = field(default_factory=dict)
+    StopMessage: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -561,7 +563,7 @@ def get_jobs_for_workflow(workflow_name: str) -> List[JobRecord]:
 
 def can_delete_job(job: JobRecord) -> bool:
     """Only finished jobs in the managed workflow/job layout may be removed."""
-    if job.Status not in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+    if job.Status not in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.TRACKING_STOPPED):
         return False
     try:
         root = Path(get_jobs_root_dir()).resolve()
